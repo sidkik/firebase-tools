@@ -34,6 +34,10 @@ export class FirestoreEmulator implements EmulatorInstance {
       this.args.functions_emulator = EmulatorRegistry.getInfoHostString(functionsInfo);
     }
 
+    if (process.env.FIRESTORE_FUNCTIONS_EMULATOR_HOST) {
+      this.args.functions_emulator = process.env.FIRESTORE_FUNCTIONS_EMULATOR_HOST;
+    }
+
     if (this.args.rules && this.args.projectId) {
       const rulesPath = this.args.rules;
       this.rulesWatcher = chokidar.watch(rulesPath, { persistent: true, ignoreInitial: true });
