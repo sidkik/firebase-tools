@@ -34,8 +34,16 @@ export class FirestoreEmulator implements EmulatorInstance {
       this.args.functions_emulator = EmulatorRegistry.getInfoHostString(functionsInfo);
     }
 
-    if (process.env.FIRESTORE_FUNCTIONS_EMULATOR_HOST) {
-      this.args.functions_emulator = process.env.FIRESTORE_FUNCTIONS_EMULATOR_HOST;
+    if (process.env.FIRESTORE_FUNCTIONS_EMULATOR) {
+      this.args.functions_emulator = process.env.FIRESTORE_FUNCTIONS_EMULATOR;
+    }
+
+    if (process.env.FIRESTORE_SEED_FROM_EXPORT) {
+      this.args.seed_from_export = process.env.FIRESTORE_SEED_FROM_EXPORT;
+    }
+
+    if (process.env.FIRESTORE_RULES) {
+      this.args.rules = process.env.FIRESTORE_RULES;
     }
 
     if (this.args.rules && this.args.projectId) {
