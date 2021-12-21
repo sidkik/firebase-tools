@@ -31,6 +31,10 @@ export class AuthCloudFunction {
         this.functionsEmulatorInfo
       )}`;
       this.multicastPath = `/functions/projects/${projectId}/trigger_multicast`;
+    } else if (process.env.AUTH_FUNCTIONS_EMULATOR) {
+      this.enabled = true;
+      this.multicastOrigin = `http://${process.env.AUTH_FUNCTIONS_EMULATOR}`;
+      this.multicastPath = `/functions/projects/${projectId}/trigger_multicast`;
     }
   }
 
@@ -43,9 +47,21 @@ export class AuthCloudFunction {
     const c = new Client({ urlPrefix: this.multicastOrigin, auth: false });
     let res;
     let err: Error | undefined;
+    this.logger.logLabeled(
+      "INFO",
+      "functions",
+      `Firebase Authentication Starting @${
+        this.multicastPath
+      } with Trigger Payload: ${JSON.stringify(multicastEventBody)}`
+    );
     try {
       res = await c.post(this.multicastPath, multicastEventBody);
     } catch (e) {
+      this.logger.logLabeled(
+        "WARN",
+        "functions",
+        `Firebase Authentication trigger error response ${JSON.stringify(res)}`
+      );
       err = e;
     }
 
@@ -53,7 +69,7 @@ export class AuthCloudFunction {
       this.logger.logLabeled(
         "WARN",
         "functions",
-        `Firebase Authentication function was not triggered due to emulation error. Please file a bug.`
+        `Firebase Authentication function was not triggered due to emulation error. Please file a bug. ${err}`
       );
     }
   }

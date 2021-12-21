@@ -1,6 +1,6 @@
 {
-  "name": "firebase-tools",
-  "version": "9.20.0",
+  "name": "@sidkik/firebase-tools",
+  "version": "9.20.0-5",
   "description": "Command-Line Interface for Firebase",
   "main": "./lib/index.js",
   "bin": {
@@ -39,7 +39,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/firebase/firebase-tools.git"
+    "url": "https://github.com/sidkik/firebase-tools.git"
   },
   "keywords": [
     "cdn",
@@ -59,11 +59,11 @@
   "author": "Firebase (https://firebase.google.com/)",
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/firebase/firebase-tools/issues"
+    "url": "https://github.com/sidkik/firebase-tools/issues"
   },
-  "homepage": "https://github.com/firebase/firebase-tools",
+  "homepage": "https://github.com/sidkik/firebase-tools",
   "publishConfig": {
-    "registry": "https://wombat-dressing-room.appspot.com"
+    "registry": "https://npm.pkg.github.com"
   },
   "nyc": {
     "require": [

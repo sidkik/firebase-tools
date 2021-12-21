@@ -19,6 +19,7 @@ export interface FirestoreEmulatorArgs {
   functions_emulator?: string;
   auto_download?: boolean;
   seed_from_export?: string;
+  webchannel_port?: string;
 }
 
 export class FirestoreEmulator implements EmulatorInstance {
@@ -44,6 +45,10 @@ export class FirestoreEmulator implements EmulatorInstance {
 
     if (process.env.FIRESTORE_RULES) {
       this.args.rules = process.env.FIRESTORE_RULES;
+    }
+
+    if (process.env.FIRESTORE_WEBCHANNEL_PORT) {
+      this.args.webchannel_port = process.env.FIRESTORE_WEBCHANNEL_PORT;
     }
 
     if (this.args.rules && this.args.projectId) {
