@@ -67,7 +67,7 @@ export class StorageCloudFunctions {
       if (cloudEventRes.status !== 200) {
         errStatus.push(cloudEventRes.status);
       }
-    } catch (e) {
+    } catch (e: any) {
       err = e as Error;
     }
 
@@ -108,7 +108,7 @@ export class StorageCloudFunctions {
     if (!ceAction) {
       throw new Error("Action is not defined as a CloudEvents action");
     }
-    const data = (objectMetadataPayload as unknown) as StorageObjectData;
+    const data = objectMetadataPayload as unknown as StorageObjectData;
     let time = new Date().toISOString();
     if (data.updated) {
       time = typeof data.updated === "string" ? data.updated : data.updated.toISOString();
