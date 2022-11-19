@@ -62,7 +62,7 @@ export class AuthCloudFunction {
         "functions",
         `Firebase Authentication trigger error response ${JSON.stringify(res)}`
       );
-      err = e;
+      err = e as Error;
     }
 
     if (err || res?.status != 200) {
