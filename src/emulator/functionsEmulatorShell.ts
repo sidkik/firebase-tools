@@ -1,10 +1,6 @@
 import * as uuid from "uuid";
-import { EmulatableBackend, FunctionsEmulator } from "./functionsEmulator";
-import {
-  EmulatedTriggerDefinition,
-  getSignatureType,
-  SignatureType,
-} from "./functionsEmulatorShared";
+import { FunctionsEmulator } from "./functionsEmulator";
+import { EmulatedTriggerDefinition } from "./functionsEmulatorShared";
 import * as utils from "../utils";
 import { logger } from "../logger";
 import { FirebaseError } from "../error";
@@ -19,7 +15,7 @@ export class FunctionsEmulatorShell implements FunctionsShellController {
   emulatedFunctions: string[];
   urls: { [name: string]: string } = {};
 
-  constructor(private emu: FunctionsEmulator, private backend: EmulatableBackend) {
+  constructor(private emu: FunctionsEmulator) {
     this.triggers = emu.getTriggerDefinitions();
     this.emulatedFunctions = this.triggers.map((t) => t.id);
 
@@ -29,11 +25,10 @@ export class FunctionsEmulatorShell implements FunctionsShellController {
     for (const trigger of this.triggers) {
       if (trigger.httpsTrigger) {
         this.urls[trigger.id] = FunctionsEmulator.getHttpFunctionUrl(
-          this.emu.getInfo().host,
-          this.emu.getInfo().port,
           this.emu.getProjectId(),
           trigger.name,
-          trigger.region
+          trigger.region,
+          this.emu.getInfo() // EmulatorRegistry is not available in shell
         );
       }
     }
@@ -67,14 +62,7 @@ export class FunctionsEmulatorShell implements FunctionsShellController {
       auth: opts.auth,
       data,
     };
-
-    this.emu.startFunctionRuntime(
-      this.backend,
-      trigger.id,
-      trigger.name,
-      getSignatureType(trigger),
-      proto
-    );
+    this.emu.sendRequest(trigger, proto);
   }
 
   private getTrigger(name: string): EmulatedTriggerDefinition {

@@ -37,10 +37,45 @@ export async function downloadEmulator(name: DownloadableEmulators): Promise<voi
     await unzip(emulator.downloadPath, emulator.unzipDir);
   }
 
+  // Set a delay while the unzip stream completes before running chmod
+  // See https://github.com/ZJONSSON/node-unzipper/issues/165
+  await new Promise((f) => setTimeout(f, 2000));
+
   const executablePath = emulator.binaryPath || emulator.downloadPath;
   fs.chmodSync(executablePath, 0o755);
 
   removeOldFiles(name, emulator);
+}
+
+export async function downloadExtensionVersion(
+  extensionVersionRef: string,
+  sourceDownloadUri: string,
+  targetDir: string
+): Promise<void> {
+  const emulatorLogger = EmulatorLogger.forExtension({ ref: extensionVersionRef });
+  emulatorLogger.logLabeled(
+    "BULLET",
+    "extensions",
+    `Starting download for ${extensionVersionRef} source code to ${targetDir}..`
+  );
+  try {
+    fs.mkdirSync(targetDir);
+  } catch (err) {
+    emulatorLogger.logLabeled(
+      "BULLET",
+      "extensions",
+      `cache directory for ${extensionVersionRef} already exists...`
+    );
+  }
+  emulatorLogger.logLabeled("BULLET", "extensions", `downloading ${sourceDownloadUri}...`);
+  const sourceCodeZip = await downloadUtils.downloadToTmp(sourceDownloadUri);
+  await unzip(sourceCodeZip, targetDir);
+  fs.chmodSync(targetDir, 0o755);
+
+  emulatorLogger.logLabeled("BULLET", "extensions", `Downloaded to ${targetDir}...`);
+  // TODO: We should not need to do this wait
+  // However, when I remove this, unzipDir doesn't contain everything yet.
+  await new Promise((resolve) => setTimeout(resolve, 1000));
 }
 
 function unzip(zipPath: string, unzipDir: string): Promise<void> {
@@ -48,7 +83,7 @@ function unzip(zipPath: string, unzipDir: string): Promise<void> {
     fs.createReadStream(zipPath)
       .pipe(unzipper.Extract({ path: unzipDir })) // eslint-disable-line new-cap
       .on("error", reject)
-      .on("finish", resolve);
+      .on("close", resolve);
   });
 }
 

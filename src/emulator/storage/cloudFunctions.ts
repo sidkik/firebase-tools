@@ -1,12 +1,12 @@
 import * as uuid from "uuid";
 
 import { EmulatorRegistry } from "../registry";
-import { EmulatorInfo, Emulators } from "../types";
+import { Emulators } from "../types";
 import { EmulatorLogger } from "../emulatorLogger";
 import { CloudStorageObjectMetadata, toSerializedDate } from "./metadata";
 import { Client } from "../../apiv2";
 import { StorageObjectData } from "@google/events/cloud/storage/v1/StorageObjectData";
-import { CloudEvent, LegacyEvent } from "../events/types";
+import { CloudEvent } from "../events/types";
 
 type StorageCloudFunctionAction = "finalize" | "metadataUpdate" | "delete" | "archive";
 const STORAGE_V2_ACTION_MAP: Record<StorageCloudFunctionAction, string> = {
@@ -18,23 +18,15 @@ const STORAGE_V2_ACTION_MAP: Record<StorageCloudFunctionAction, string> = {
 
 export class StorageCloudFunctions {
   private logger = EmulatorLogger.forEmulator(Emulators.STORAGE);
-  private functionsEmulatorInfo?: EmulatorInfo;
-  private multicastOrigin = "";
   private multicastPath = "";
   private enabled = false;
   private client?: Client;
 
   constructor(private projectId: string) {
-    const functionsEmulator = EmulatorRegistry.get(Emulators.FUNCTIONS);
-
-    if (functionsEmulator) {
+    if (EmulatorRegistry.isRunning(Emulators.FUNCTIONS)) {
       this.enabled = true;
-      this.functionsEmulatorInfo = functionsEmulator.getInfo();
-      this.multicastOrigin = `http://${EmulatorRegistry.getInfoHostString(
-        this.functionsEmulatorInfo
-      )}`;
       this.multicastPath = `/functions/projects/${projectId}/trigger_multicast`;
-      this.client = new Client({ urlPrefix: this.multicastOrigin, auth: false });
+      this.client = EmulatorRegistry.client(Emulators.FUNCTIONS);
     }
   }
 

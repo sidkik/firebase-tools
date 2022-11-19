@@ -1,4 +1,4 @@
-import * as clc from "cli-color";
+import * as clc from "colorette";
 
 import * as utils from "../utils";
 import { logger } from "../logger";
@@ -13,8 +13,9 @@ import { LogData } from "./loggingEmulator";
  * USER - logged by user code, always show to humans.
  * WARN - warnings from our code that humans need.
  * WARN_ONCE - warnings from our code that humans need, but only once per session.
+ * ERROR - error from our code that humans need.
  */
-type LogType = "DEBUG" | "INFO" | "BULLET" | "SUCCESS" | "USER" | "WARN" | "WARN_ONCE";
+type LogType = "DEBUG" | "INFO" | "BULLET" | "SUCCESS" | "USER" | "WARN" | "WARN_ONCE" | "ERROR";
 
 const TYPE_VERBOSITY: { [type in LogType]: number } = {
   DEBUG: 0,
@@ -24,6 +25,7 @@ const TYPE_VERBOSITY: { [type in LogType]: number } = {
   USER: 2,
   WARN: 2,
   WARN_ONCE: 2,
+  ERROR: 2,
 };
 
 export enum Verbosity {
@@ -31,15 +33,19 @@ export enum Verbosity {
   INFO = 1,
   QUIET = 2,
 }
+export type ExtensionLogInfo = {
+  ref?: string;
+  instanceId?: string;
+};
 
 export class EmulatorLogger {
   static verbosity: Verbosity = Verbosity.DEBUG;
   static warnOnceCache = new Set<string>();
 
-  constructor(private data: LogData = {}) {}
+  constructor(public readonly name: string, private data: LogData = {}) {}
 
   static forEmulator(emulator: Emulators) {
-    return new EmulatorLogger({
+    return new EmulatorLogger(emulator, {
       metadata: {
         emulator: {
           name: emulator,
@@ -48,15 +54,27 @@ export class EmulatorLogger {
     });
   }
 
-  static forFunction(functionName: string) {
-    return new EmulatorLogger({
+  static forFunction(functionName: string, extensionLogInfo?: ExtensionLogInfo): EmulatorLogger {
+    return new EmulatorLogger(Emulators.FUNCTIONS, {
       metadata: {
         emulator: {
-          name: "functions",
+          name: Emulators.FUNCTIONS,
         },
         function: {
           name: functionName,
         },
+        extension: extensionLogInfo,
+      },
+    });
+  }
+
+  static forExtension(extensionLogInfo: ExtensionLogInfo): EmulatorLogger {
+    return new EmulatorLogger(Emulators.EXTENSIONS, {
+      metadata: {
+        emulator: {
+          name: Emulators.EXTENSIONS,
+        },
+        extension: extensionLogInfo,
       },
     });
   }
@@ -111,6 +129,9 @@ export class EmulatorLogger {
         break;
       case "SUCCESS":
         utils.logSuccess(text, "info", mergedData);
+        break;
+      case "ERROR":
+        utils.logBullet(text, "error", mergedData);
         break;
     }
   }
@@ -253,7 +274,14 @@ You can probably fix this by running "npm install ${systemLog.data.name}@latest"
    * @param text
    * @param data
    */
-  logLabeled(type: LogType, label: string, text: string): void {
+  logLabeled(type: LogType, text: string): void;
+  logLabeled(type: LogType, label: string, text: string): void;
+  logLabeled(type: LogType, labelOrText: string, text?: string): void {
+    let label = labelOrText;
+    if (text === undefined) {
+      text = label;
+      label = this.name;
+    }
     if (EmulatorLogger.shouldSupress(type)) {
       logger.debug(`[${label}] ${text}`);
       return;
@@ -285,6 +313,9 @@ You can probably fix this by running "npm install ${systemLog.data.name}@latest"
           utils.logLabeledWarning(label, text, "warn", mergedData);
           EmulatorLogger.warnOnceCache.add(text);
         }
+        break;
+      case "ERROR":
+        utils.logLabeledError(label, text, "error", mergedData);
         break;
     }
   }

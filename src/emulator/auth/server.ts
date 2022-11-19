@@ -3,11 +3,12 @@ import * as express from "express";
 import * as exegesisExpress from "exegesis-express";
 import { ValidationError } from "exegesis/lib/errors";
 import * as _ from "lodash";
+import { SingleProjectMode } from "./index";
 import { OpenAPIObject, PathsObject, ServerObject, OperationObject } from "openapi3-ts";
 import { EmulatorLogger } from "../emulatorLogger";
 import { Emulators } from "../types";
 import { authOperations, AuthOps, AuthOperation, FirebaseJwtPayload } from "./operations";
-import { AgentProjectState, ProjectState } from "./state";
+import { AgentProjectState, decodeRefreshToken, ProjectState } from "./state";
 import apiSpecUntyped from "./apiSpec";
 import {
   PromiseController,
@@ -116,10 +117,23 @@ function specWithEmulatorServer(protocol: string, host: string | undefined): Ope
  */
 export async function createApp(
   defaultProjectId: string,
+  singleProjectMode = SingleProjectMode.NO_WARNING,
   projectStateForId = new Map<string, AgentProjectState>()
 ): Promise<express.Express> {
   const app = express();
   app.set("json spaces", 2);
+
+  // Retrun access-control-allow-private-network heder if requested
+  // Enables accessing locahost when site is exposed via tunnel see https://github.com/firebase/firebase-tools/issues/4227
+  // Aligns with https://wicg.github.io/private-network-access/#headers
+  // Replace with cors option if adopted, see https://github.com/expressjs/cors/issues/236
+  app.use("/", (req, res, next) => {
+    if (req.headers["access-control-request-private-network"]) {
+      res.setHeader("access-control-allow-private-network", "true");
+    }
+    next();
+  });
+
   // Enable CORS for all APIs, all origins (reflected), and all headers (reflected).
   // This is similar to production behavior. Safe since all APIs are cookieless.
   app.use(cors({ origin: true }));
@@ -350,6 +364,22 @@ export async function createApp(
 
   function getProjectStateById(projectId: string, tenantId?: string): ProjectState {
     let agentState = projectStateForId.get(projectId);
+
+    if (
+      singleProjectMode !== SingleProjectMode.NO_WARNING &&
+      projectId &&
+      defaultProjectId !== projectId
+    ) {
+      const errorString =
+        `Multiple projectIds are not recommended in single project mode. ` +
+        `Requested project ID ${projectId}, but the emulator is configured for ` +
+        `${defaultProjectId}. To opt-out of single project mode add/set the ` +
+        `\'"singleProjectMode"\' false' property in the firebase.json emulators config.`;
+      EmulatorLogger.forEmulator(Emulators.AUTH).log("WARN", errorString);
+      if (singleProjectMode === SingleProjectMode.ERROR) {
+        throw new BadRequestError(errorString);
+      }
+    }
     if (!agentState) {
       agentState = new AgentProjectState(projectId);
       projectStateForId.set(projectId, agentState);
@@ -506,6 +536,19 @@ function toExegesisController(
         targetTenantId = targetTenantId || decoded?.payload.firebase.tenant;
       }
 
+      // Need to check refresh token for tenant ID for grantToken endpoint
+      if (ctx.requestBody?.refreshToken) {
+        const refreshTokenRecord = decodeRefreshToken(ctx.requestBody!.refreshToken);
+        if (refreshTokenRecord.tenantId && targetTenantId) {
+          // Shouldn't ever reach this assertion, but adding for completeness
+          assert(
+            refreshTokenRecord.tenantId === targetTenantId,
+            "TENANT_ID_MISMATCH: ((Refresh token tenant ID does not match target tenant ID.))"
+          );
+        }
+        targetTenantId = targetTenantId || refreshTokenRecord.tenantId;
+      }
+
       return operation(getProjectStateById(targetProjectId, targetTenantId), ctx.requestBody, ctx);
     };
   }
@@ -524,7 +567,7 @@ function wrapValidateBody(pluginContext: ExegesisPluginContext): void {
   if (op.validateBody && !op._authEmulatorValidateBodyWrapped) {
     const validateBody = op.validateBody.bind(op);
     op.validateBody = (body) => {
-      return validateAndFixRestMappingRequestBody(validateBody, body, pluginContext.api);
+      return validateAndFixRestMappingRequestBody(validateBody, body);
     };
     op._authEmulatorValidateBodyWrapped = true;
   }
@@ -533,9 +576,7 @@ function wrapValidateBody(pluginContext: ExegesisPluginContext): void {
 function validateAndFixRestMappingRequestBody(
   validate: ValidatorFunction,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  body: any,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  api: any
+  body: any
 ): ReturnType<ValidatorFunction> {
   body = convertKeysToCamelCase(body);
 

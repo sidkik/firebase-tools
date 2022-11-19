@@ -1,5 +1,5 @@
 import Table = require("cli-table");
-import * as clc from "cli-color";
+import * as clc from "colorette";
 import * as utils from "../utils";
 import { Command } from "../command";
 import { Aligner, CmQuery, queryTimeSeries, TimeSeriesView } from "../gcp/cloudmonitoring";
@@ -13,7 +13,7 @@ import { logger } from "../logger";
 import { promptOnce } from "../prompt";
 import { shortenUrl } from "../shortenUrl";
 
-module.exports = new Command("ext:dev:usage <publisherId>")
+export const command = new Command("ext:dev:usage <publisherId>")
   .description("get usage for an extension")
   .help(
     "use this command to get the usage of extensions you published. " +
@@ -57,6 +57,7 @@ module.exports = new Command("ext:dev:usage <publisherId>")
         name: "extension",
         message: "Which published extension do you want to view the stats for?",
         choices: extensions.map((e) => {
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
           const [_, name] = e.ref.split("/");
           return {
             name,
@@ -70,8 +71,8 @@ module.exports = new Command("ext:dev:usage <publisherId>")
 
     const projectNumber = getPublisherProjectFromName(profile.name);
 
-    const past30d = new Date();
-    past30d.setDate(past30d.getDate() - 30);
+    const past45d = new Date();
+    past45d.setDate(past45d.getDate() - 45);
 
     const query: CmQuery = {
       filter:
@@ -79,7 +80,7 @@ module.exports = new Command("ext:dev:usage <publisherId>")
         `resource.type="firebaseextensions.googleapis.com/ExtensionVersion" ` +
         `resource.labels.extension="${extensionName}"`,
       "interval.endTime": new Date().toJSON(),
-      "interval.startTime": past30d.toJSON(),
+      "interval.startTime": past45d.toJSON(),
       view: TimeSeriesView.FULL,
       "aggregation.alignmentPeriod": (60 * 60 * 24).toString() + "s",
       "aggregation.perSeriesAligner": Aligner.ALIGN_MAX,
@@ -117,20 +118,16 @@ module.exports = new Command("ext:dev:usage <publisherId>")
 
     logger.info(table.toString());
 
-    const link = await buildCloudMonitoringLink({
-      projectNumber: projectNumber,
-      extensionName,
-    });
-
     utils.logLabeledBullet(logPrefix, `How to read this table:`);
     logger.info(`* Due to privacy considerations, numbers are reported as ranges.`);
     logger.info(`* In the absence of significant changes, we will render a '-' symbol.`);
     logger.info(
       `* You will need more than 10 installs over a period of more than 28 days to render sufficient data.`
     );
-    logger.info(`For more detail, visit: ${link}`);
+    // TODO(b/216289102): Add buildCloudMonitoringLink back after UI is fixed.
   });
 
+// eslint-disable-next-line @typescript-eslint/no-unused-vars -- b/216289102
 async function buildCloudMonitoringLink(args: {
   projectNumber: number;
   extensionName: string;

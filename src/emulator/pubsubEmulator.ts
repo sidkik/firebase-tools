@@ -25,7 +25,7 @@ interface Trigger {
 }
 
 export class PubsubEmulator implements EmulatorInstance {
-  pubsub: PubSub;
+  private _pubsub: PubSub | undefined;
 
   // Map of topic name to a list of functions to trigger
   triggersForTopic: Map<string, Trigger[]>;
@@ -38,12 +38,17 @@ export class PubsubEmulator implements EmulatorInstance {
 
   private logger = EmulatorLogger.forEmulator(Emulators.PUBSUB);
 
+  get pubsub(): PubSub {
+    if (!this._pubsub) {
+      this._pubsub = new PubSub({
+        apiEndpoint: EmulatorRegistry.url(Emulators.PUBSUB).host,
+        projectId: this.args.projectId,
+      });
+    }
+    return this._pubsub;
+  }
+
   constructor(private args: PubsubEmulatorArgs) {
-    const { host, port } = this.getInfo();
-    this.pubsub = new PubSub({
-      apiEndpoint: `${host}:${port}`,
-      projectId: this.args.projectId,
-    });
     this.triggersForTopic = new Map();
     this.subscriptionForTopic = new Map();
   }
@@ -61,7 +66,7 @@ export class PubsubEmulator implements EmulatorInstance {
   }
 
   getInfo(): EmulatorInfo {
-    const host = this.args.host || Constants.getDefaultHost(Emulators.PUBSUB);
+    const host = this.args.host || Constants.getDefaultHost();
     const port = this.args.port || Constants.getDefaultPort(Emulators.PUBSUB);
 
     return {
@@ -76,12 +81,50 @@ export class PubsubEmulator implements EmulatorInstance {
     return Emulators.PUBSUB;
   }
 
+  private async maybeCreateTopicAndSub(topicName: string): Promise<Subscription> {
+    const topic = this.pubsub.topic(topicName);
+    try {
+      this.logger.logLabeled("DEBUG", "pubsub", `Creating topic: ${topicName}`);
+      await topic.create();
+    } catch (e: any) {
+      // CODE 6: ALREADY EXISTS. Carry on.
+      if (e && e.code === 6) {
+        this.logger.logLabeled("DEBUG", "pubsub", `Topic ${topicName} exists`);
+      } else {
+        throw new FirebaseError(`Could not create topic ${topicName}`, { original: e });
+      }
+    }
+
+    const subName = `emulator-sub-${topicName}`;
+    let sub: Subscription;
+    try {
+      this.logger.logLabeled("DEBUG", "pubsub", `Creating sub for topic: ${topicName}`);
+      [sub] = await topic.createSubscription(subName);
+    } catch (e: any) {
+      if (e && e.code === 6) {
+        // CODE 6: ALREADY EXISTS. Carry on.
+        this.logger.logLabeled("DEBUG", "pubsub", `Sub for ${topicName} exists`);
+        sub = topic.subscription(subName);
+      } else {
+        throw new FirebaseError(`Could not create sub ${subName}`, { original: e });
+      }
+    }
+
+    sub.on("message", (message: Message) => {
+      this.onMessage(topicName, message);
+    });
+
+    return sub;
+  }
+
   async addTrigger(topicName: string, triggerKey: string, signatureType: SignatureType) {
     this.logger.logLabeled(
       "DEBUG",
       "pubsub",
       `addTrigger(${topicName}, ${triggerKey}, ${signatureType})`
     );
+
+    const sub = await this.maybeCreateTopicAndSub(topicName);
 
     const triggers = this.triggersForTopic.get(topicName) || [];
     if (
@@ -92,54 +135,20 @@ export class PubsubEmulator implements EmulatorInstance {
       return;
     }
 
-    const topic = this.pubsub.topic(topicName);
-    try {
-      this.logger.logLabeled("DEBUG", "pubsub", `Creating topic: ${topicName}`);
-      await topic.create();
-    } catch (e: any) {
-      if (e && e.code === 6) {
-        this.logger.logLabeled("DEBUG", "pubsub", `Topic ${topicName} exists`);
-      } else {
-        throw new FirebaseError(`Could not create topic ${topicName}`, { original: e });
-      }
-    }
-
-    const subName = `emulator-sub-${topicName}`;
-    let sub;
-    try {
-      this.logger.logLabeled("DEBUG", "pubsub", `Creating sub for topic: ${topicName}`);
-      [sub] = await topic.createSubscription(subName);
-    } catch (e: any) {
-      if (e && e.code === 6) {
-        this.logger.logLabeled("DEBUG", "pubsub", `Sub for ${topicName} exists`);
-        sub = topic.subscription(`emulator-sub-${topicName}`);
-      } else {
-        throw new FirebaseError(`Could not create sub ${subName}`, { original: e });
-      }
-    }
-
-    sub.on("message", (message: Message) => {
-      this.onMessage(topicName, message);
-    });
-
     triggers.push({ triggerKey, signatureType });
     this.triggersForTopic.set(topicName, triggers);
     this.subscriptionForTopic.set(topicName, sub);
   }
 
   private ensureFunctionsClient() {
-    if (this.client != undefined) return;
+    if (this.client !== undefined) return;
 
-    const funcEmulator = EmulatorRegistry.get(Emulators.FUNCTIONS);
-    if (!funcEmulator) {
+    if (!EmulatorRegistry.isRunning(Emulators.FUNCTIONS)) {
       throw new FirebaseError(
         `Attempted to execute pubsub trigger but could not find the Functions emulator`
       );
     }
-    this.client = new Client({
-      urlPrefix: `http://${EmulatorRegistry.getInfoHostString(funcEmulator.getInfo())}`,
-      auth: false,
-    });
+    this.client = EmulatorRegistry.client(Emulators.FUNCTIONS);
   }
 
   private createLegacyEventRequestBody(topic: string, message: Message) {

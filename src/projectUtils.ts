@@ -1,8 +1,9 @@
 import { getFirebaseProject } from "./management/projects";
 import { RC } from "./rc";
 
-import * as clc from "cli-color";
-import * as marked from "marked";
+import * as clc from "colorette";
+// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-var-requires
+const { marked } = require("marked");
 
 const { FirebaseError } = require("./error");
 

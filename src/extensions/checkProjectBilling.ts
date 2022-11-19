@@ -1,4 +1,4 @@
-import * as clc from "cli-color";
+import * as clc from "colorette";
 import * as opn from "open";
 
 import * as cloudbilling from "../gcp/cloudbilling";
@@ -68,7 +68,7 @@ Please select the one that you would like to associate with this project:`,
     const billingURL = `https://console.cloud.google.com/billing/linkedaccount?project=${projectId}`;
     billingEnabled = await openBillingAccount(projectId, billingURL, true);
   } else {
-    const billingAccount = accounts.find((a) => a.displayName == answer);
+    const billingAccount = accounts.find((a) => a.displayName === answer);
     billingEnabled = await cloudbilling.setBillingAccount(projectId, billingAccount!.name);
   }
 
@@ -87,7 +87,7 @@ async function setUpBillingAccount(projectId: string) {
     `Extension require your project to be upgraded to the Blaze plan. Please visit the following link to add a billing account:`
   );
   logger.info();
-  logger.info(clc.bold.underline(billingURL));
+  logger.info(clc.bold(clc.underline(billingURL)));
   logger.info();
 
   const open = await prompt.promptOnce({

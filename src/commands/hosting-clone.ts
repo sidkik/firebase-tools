@@ -1,4 +1,4 @@
-import { bold } from "cli-color";
+import { bold } from "colorette";
 import * as ora from "ora";
 
 import { Command } from "../command";
@@ -13,11 +13,19 @@ import {
 } from "../hosting/api";
 import * as utils from "../utils";
 import { requireAuth } from "../requireAuth";
-import * as marked from "marked";
+// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-var-requires
+const { marked } = require("marked");
 import { logger } from "../logger";
 
-export default new Command("hosting:clone <source> <targetChannel>")
+export const command = new Command("hosting:clone <source> <targetChannel>")
   .description("clone a version from one site to another")
+  .help(
+    `<source> and <targetChannel> accept the following format: <siteId>:<channelId>
+
+For example, to copy the content for a site \`my-site\` from a preview channel \`staging\` to a \`live\` channel, the command would look be:
+
+  firebase hosting:clone my-site:foo my-site:live`
+  )
   .before(requireAuth)
   .action(async (source = "", targetChannel = "") => {
     // sites/{site}/versions/{version}
@@ -45,8 +53,8 @@ export default new Command("hosting:clone <source> <targetChannel>")
       sourceChannelId = normalizeName(sourceChannelId);
     }
 
-    const equalSiteIds = sourceSiteId == targetSiteId;
-    const equalChannelIds = sourceChannelId == targetChannelId;
+    const equalSiteIds = sourceSiteId === targetSiteId;
+    const equalChannelIds = sourceChannelId === targetChannelId;
     if (equalSiteIds && equalChannelIds) {
       throw new FirebaseError(
         `Source and destination cannot be equal. Please pick a different source or desination.`
@@ -105,7 +113,7 @@ export default new Command("hosting:clone <source> <targetChannel>")
     }
     const currentTargetVersionName = tChannel.release?.version?.name;
 
-    if (equalSiteIds && sourceVersionName == currentTargetVersionName) {
+    if (equalSiteIds && sourceVersionName === currentTargetVersionName) {
       utils.logSuccess(
         `Channels ${bold(sourceChannelId)} and ${bold(
           targetChannel

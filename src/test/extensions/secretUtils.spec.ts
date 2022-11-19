@@ -2,11 +2,11 @@ import * as nock from "nock";
 import { expect } from "chai";
 
 import * as api from "../../api";
-import * as extensionsApi from "../../extensions/extensionsApi";
+import { ExtensionInstance, ParamType } from "../../extensions/types";
 import * as secretsUtils from "../../extensions/secretsUtils";
 
 const PROJECT_ID = "test-project";
-const TEST_INSTANCE: extensionsApi.ExtensionInstance = {
+const TEST_INSTANCE: ExtensionInstance = {
   name: "projects/invader-zim/instances/image-resizer",
   createTime: "2019-05-19T00:20:10.416947Z",
   updateTime: "2019-05-19T00:20:10.416947Z",
@@ -35,12 +35,12 @@ const TEST_INSTANCE: extensionsApi.ExtensionInstance = {
           {
             param: "SECRET1",
             label: "secret 1",
-            type: extensionsApi.ParamType.SECRET,
+            type: ParamType.SECRET,
           },
           {
             param: "SECRET2",
             label: "secret 2",
-            type: extensionsApi.ParamType.SECRET,
+            type: ParamType.SECRET,
           },
         ],
       },
@@ -60,13 +60,13 @@ describe("secretsUtils", () => {
   describe("getManagedSecrets", () => {
     it("only returns secrets that have labels set", async () => {
       nock(api.secretManagerOrigin)
-        .get(`/v1beta1/projects/${PROJECT_ID}/secrets/secret1`)
+        .get(`/v1/projects/${PROJECT_ID}/secrets/secret1`)
         .reply(200, {
           name: `projects/${PROJECT_ID}/secrets/secret1`,
           labels: { "firebase-extensions-managed": "true" },
         });
       nock(api.secretManagerOrigin)
-        .get(`/v1beta1/projects/${PROJECT_ID}/secrets/secret2`)
+        .get(`/v1/projects/${PROJECT_ID}/secrets/secret2`)
         .reply(200, {
           name: `projects/${PROJECT_ID}/secrets/secret2`,
         }); // no labels

@@ -1,4 +1,4 @@
-import { bold, yellow } from "cli-color";
+import { bold, yellow } from "colorette";
 
 import { Command } from "../command";
 import { FirebaseError } from "../error";
@@ -11,28 +11,31 @@ import {
   cleanAuthState,
   normalizeName,
 } from "../hosting/api";
-import { normalizedHostingConfigs } from "../hosting/normalizedHostingConfigs";
 import { requirePermissions } from "../requirePermissions";
-import * as deploy from "../deploy";
+import { deploy } from "../deploy";
 import { needProjectId } from "../projectUtils";
 import { logger } from "../logger";
-import * as requireConfig from "../requireConfig";
+import { requireConfig } from "../requireConfig";
 import { DEFAULT_DURATION, calculateChannelExpireTTL } from "../hosting/expireUtils";
 import { logLabeledSuccess, datetimeString, logLabeledWarning, consoleUrl } from "../utils";
-import * as marked from "marked";
+import { hostingConfig } from "../hosting/config";
+// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-var-requires
+const { marked } = require("marked");
 import { requireHostingSite } from "../requireHostingSite";
+import { HostingOptions } from "../hosting/options";
+import { Options } from "../options";
 
 const LOG_TAG = "hosting:channel";
 
 interface ChannelInfo {
-  target: string | null;
+  target?: string;
   site: string;
   url: string;
   version: string;
   expireTime: string;
 }
 
-export default new Command("hosting:channel:deploy [channelId]")
+export const command = new Command("hosting:channel:deploy [channelId]")
   .description("deploy to a specific Firebase Hosting channel")
   .option(
     "-e, --expires <duration>",
@@ -47,7 +50,7 @@ export default new Command("hosting:channel:deploy [channelId]")
   .action(
     async (
       channelId: string,
-      options: any // eslint-disable-line @typescript-eslint/no-explicit-any
+      options: Options & HostingOptions
     ): Promise<{ [targetOrSite: string]: ChannelInfo }> => {
       const projectId = needProjectId(options);
 
@@ -86,15 +89,15 @@ export default new Command("hosting:channel:deploy [channelId]")
           .join(",");
       }
 
-      const sites: ChannelInfo[] = normalizedHostingConfigs(options, {
-        resolveTargets: true,
-      }).map((cfg) => ({
-        site: cfg.site,
-        target: cfg.target,
-        url: "",
-        version: "",
-        expireTime: "",
-      }));
+      const sites: ChannelInfo[] = hostingConfig(options).map((config) => {
+        return {
+          target: config.target,
+          site: config.site,
+          url: "",
+          version: "",
+          expireTime: "",
+        };
+      });
 
       await Promise.all(
         sites.map(async (siteInfo) => {
@@ -174,7 +177,7 @@ export default new Command("hosting:channel:deploy [channelId]")
         }
         logLabeledSuccess(
           LOG_TAG,
-          `Channel URL (${bold(d.site || d.target)}): ${d.url} ${expires}${version}`
+          `Channel URL (${bold(d.site || d.target || "")}): ${d.url} ${expires}${version}`
         );
       });
       return deploys;

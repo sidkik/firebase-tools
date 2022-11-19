@@ -14,6 +14,11 @@ import * as cloudtasksNS from "../../../../gcp/cloudtasks";
 import * as backend from "../../../../deploy/functions/backend";
 import * as scraper from "../../../../deploy/functions/release/sourceTokenScraper";
 import * as planner from "../../../../deploy/functions/release/planner";
+import * as v2events from "../../../../functions/events/v2";
+import * as v1events from "../../../../functions/events/v1";
+import * as servicesNS from "../../../../deploy/functions/services";
+import * as identityPlatformNS from "../../../../gcp/identityPlatform";
+import { AuthBlockingService } from "../../../../deploy/functions/services/auth";
 
 describe("Fabricator", () => {
   // Stub all GCP APIs to make sure this test is hermetic
@@ -24,6 +29,8 @@ describe("Fabricator", () => {
   let scheduler: sinon.SinonStubbedInstance<typeof schedulerNS>;
   let run: sinon.SinonStubbedInstance<typeof runNS>;
   let tasks: sinon.SinonStubbedInstance<typeof cloudtasksNS>;
+  let services: sinon.SinonStubbedInstance<typeof servicesNS>;
+  let identityPlatform: sinon.SinonStubbedInstance<typeof identityPlatformNS>;
 
   beforeEach(() => {
     gcf = sinon.stub(gcfNS);
@@ -33,6 +40,8 @@ describe("Fabricator", () => {
     scheduler = sinon.stub(schedulerNS);
     run = sinon.stub(runNS);
     tasks = sinon.stub(cloudtasksNS);
+    services = sinon.stub(servicesNS);
+    identityPlatform = sinon.stub(identityPlatformNS);
 
     gcf.functionFromEndpoint.restore();
     gcfv2.functionFromEndpoint.restore();
@@ -54,6 +63,7 @@ describe("Fabricator", () => {
     run.setInvokerCreate.rejects(new Error("unexpected run.setInvokerCreate"));
     run.setInvokerUpdate.rejects(new Error("unexpected run.setInvokerUpdate"));
     run.replaceService.rejects(new Error("unexpected run.replaceService"));
+    run.updateService.rejects(new Error("Unexpected run.updateService"));
     poller.pollOperation.rejects(new Error("unexpected poller.pollOperation"));
     pubsub.createTopic.rejects(new Error("unexpected pubsub.createTopic"));
     pubsub.deleteTopic.rejects(new Error("unexpected pubsub.deleteTopic"));
@@ -66,6 +76,13 @@ describe("Fabricator", () => {
     tasks.setEnqueuer.rejects(new Error("unexpected tasks.setEnqueuer"));
     tasks.setIamPolicy.rejects(new Error("unexpected tasks.setIamPolicy"));
     tasks.getIamPolicy.rejects(new Error("unexpected tasks.getIamPolicy"));
+    services.serviceForEndpoint.throws("unexpected services.serviceForEndpoint");
+    identityPlatform.getBlockingFunctionsConfig.rejects(
+      new Error("unexpected identityPlatform.getBlockingFunctionsConfig")
+    );
+    identityPlatform.setBlockingFunctionsConfig.rejects(
+      new Error("unexpected identityPlatform.setBlockingFunctionsConfig")
+    );
   });
 
   afterEach(() => {
@@ -80,12 +97,14 @@ describe("Fabricator", () => {
   const ctorArgs: fabricator.FabricatorArgs = {
     executor: new executor.InlineExecutor(),
     functionExecutor: new executor.InlineExecutor(),
-    sourceUrl: "https://example.com",
-    storage: {
-      "us-central1": storage,
-      "us-west1": storage,
+    sources: {
+      default: {
+        sourceUrl: "https://example.com",
+        storage: storage,
+      },
     },
     appEngineLocation: "us-central1",
+    projectNumber: "1234567",
   };
   let fab: fabricator.Fabricator;
   beforeEach(() => {
@@ -106,6 +125,9 @@ describe("Fabricator", () => {
       region: "us-central1",
       entryPoint: "entrypoint",
       runtime: "nodejs16",
+      availableMemoryMb: 256,
+      cpu: backend.memoryToGen1Cpu(256),
+      codebase: "default",
       ...JSON.parse(JSON.stringify(base)),
       ...trigger,
     } as backend.Endpoint;
@@ -136,71 +158,166 @@ describe("Fabricator", () => {
       ).to.be.rejectedWith(reporter.DeploymentError, "set invoker");
     });
 
-    it("enforces SECURE_ALWAYS HTTPS policies", async () => {
-      gcf.createFunction.resolves({ name: "op", type: "create", done: false });
-      poller.pollOperation.resolves();
-      gcf.setInvokerCreate.resolves();
-      const ep = endpoint();
+    describe("httpsTrigger", () => {
+      it("enforces SECURE_ALWAYS HTTPS policies", async () => {
+        gcf.createFunction.resolves({ name: "op", type: "create", done: false });
+        poller.pollOperation.resolves();
+        gcf.setInvokerCreate.resolves();
+        const ep = endpoint();
 
-      await fab.createV1Function(ep, new scraper.SourceTokenScraper());
-      expect(gcf.createFunction).to.have.been.calledWithMatch({
-        httpsTrigger: {
-          securityLevel: "SECURE_ALWAYS",
-        },
+        await fab.createV1Function(ep, new scraper.SourceTokenScraper());
+        expect(gcf.createFunction).to.have.been.calledWithMatch({
+          httpsTrigger: {
+            securityLevel: "SECURE_ALWAYS",
+          },
+        });
+      });
+
+      it("sets public invoker by default", async () => {
+        gcf.createFunction.resolves({ name: "op", type: "create", done: false });
+        poller.pollOperation.resolves();
+        gcf.setInvokerCreate.resolves();
+        const ep = endpoint();
+
+        await fab.createV1Function(ep, new scraper.SourceTokenScraper());
+        expect(gcf.setInvokerCreate).to.have.been.calledWith(ep.project, backend.functionName(ep), [
+          "public",
+        ]);
+      });
+
+      it("sets explicit invoker", async () => {
+        gcf.createFunction.resolves({ name: "op", type: "create", done: false });
+        poller.pollOperation.resolves();
+        gcf.setInvokerCreate.resolves();
+        const ep = endpoint({
+          httpsTrigger: {
+            invoker: ["custom@"],
+          },
+        });
+
+        await fab.createV1Function(ep, new scraper.SourceTokenScraper());
+        expect(gcf.setInvokerCreate).to.have.been.calledWith(ep.project, backend.functionName(ep), [
+          "custom@",
+        ]);
+      });
+
+      it("doesn't set private invoker on create", async () => {
+        gcf.createFunction.resolves({ name: "op", type: "create", done: false });
+        poller.pollOperation.resolves();
+        gcf.setInvokerCreate.resolves();
+        const ep = endpoint({
+          httpsTrigger: {
+            invoker: ["private"],
+          },
+        });
+
+        await fab.createV1Function(ep, new scraper.SourceTokenScraper());
+        expect(gcf.setInvokerCreate).to.not.have.been.called;
       });
     });
 
-    it("sets invoker by default", async () => {
-      gcf.createFunction.resolves({ name: "op", type: "create", done: false });
-      poller.pollOperation.resolves();
-      gcf.setInvokerCreate.resolves();
-      const ep = endpoint();
+    describe("callableTrigger", () => {
+      it("enforces SECURE_ALWAYS HTTPS policies", async () => {
+        gcf.createFunction.resolves({ name: "op", type: "create", done: false });
+        poller.pollOperation.resolves();
+        gcf.setInvokerCreate.resolves();
+        const ep = endpoint({ callableTrigger: {} });
 
-      await fab.createV1Function(ep, new scraper.SourceTokenScraper());
-      expect(gcf.setInvokerCreate).to.have.been.calledWith(ep.project, backend.functionName(ep), [
-        "public",
-      ]);
-    });
-
-    it("sets explicit invoker", async () => {
-      gcf.createFunction.resolves({ name: "op", type: "create", done: false });
-      poller.pollOperation.resolves();
-      gcf.setInvokerCreate.resolves();
-      const ep = endpoint({
-        httpsTrigger: {
-          invoker: ["custom@"],
-        },
+        await fab.createV1Function(ep, new scraper.SourceTokenScraper());
+        expect(gcf.createFunction).to.have.been.calledWithMatch({
+          httpsTrigger: {
+            securityLevel: "SECURE_ALWAYS",
+          },
+        });
       });
 
-      await fab.createV1Function(ep, new scraper.SourceTokenScraper());
-      expect(gcf.setInvokerCreate).to.have.been.calledWith(ep.project, backend.functionName(ep), [
-        "custom@",
-      ]);
+      it("always sets invoker to public", async () => {
+        gcf.createFunction.resolves({ name: "op", type: "create", done: false });
+        poller.pollOperation.resolves();
+        gcf.setInvokerCreate.resolves();
+        const ep = endpoint({ callableTrigger: {} });
+
+        await fab.createV1Function(ep, new scraper.SourceTokenScraper());
+        expect(gcf.setInvokerCreate).to.have.been.calledWith(ep.project, backend.functionName(ep), [
+          "public",
+        ]);
+      });
     });
 
-    it("doesn't set private invoker on create", async () => {
-      gcf.createFunction.resolves({ name: "op", type: "create", done: false });
-      poller.pollOperation.resolves();
-      gcf.setInvokerCreate.resolves();
-      const ep = endpoint({
-        httpsTrigger: {
-          invoker: ["private"],
-        },
+    describe("taskQueueTrigger", () => {
+      it("enforces SECURE_ALWAYS HTTPS policies", async () => {
+        gcf.createFunction.resolves({ name: "op", type: "create", done: false });
+        poller.pollOperation.resolves();
+        gcf.setInvokerCreate.resolves();
+        const ep = endpoint({ taskQueueTrigger: {} });
+
+        await fab.createV1Function(ep, new scraper.SourceTokenScraper());
+        expect(gcf.createFunction).to.have.been.calledWithMatch({
+          httpsTrigger: {
+            securityLevel: "SECURE_ALWAYS",
+          },
+        });
       });
 
-      await fab.createV1Function(ep, new scraper.SourceTokenScraper());
-      expect(gcf.setInvokerCreate).to.not.have.been.called;
+      it("doesn't set invoker by default", async () => {
+        gcf.createFunction.resolves({ name: "op", type: "create", done: false });
+        poller.pollOperation.resolves();
+        gcf.setInvokerCreate.resolves();
+        const ep = endpoint({ taskQueueTrigger: {} });
+
+        await fab.createV1Function(ep, new scraper.SourceTokenScraper());
+        expect(gcf.setInvokerCreate).to.not.have.been.called;
+      });
+
+      it("sets explicit invoker", async () => {
+        gcf.createFunction.resolves({ name: "op", type: "create", done: false });
+        poller.pollOperation.resolves();
+        gcf.setInvokerCreate.resolves();
+        const ep = endpoint({
+          httpsTrigger: {
+            invoker: ["custom@"],
+          },
+        });
+
+        await fab.createV1Function(ep, new scraper.SourceTokenScraper());
+        expect(gcf.setInvokerCreate).to.have.been.calledWith(ep.project, backend.functionName(ep), [
+          "custom@",
+        ]);
+      });
+    });
+
+    describe("blockingTrigger", () => {
+      it("sets the invoker to public", async () => {
+        gcf.createFunction.resolves({ name: "op", type: "create", done: false });
+        poller.pollOperation.resolves();
+        gcf.setInvokerCreate.resolves();
+        const ep = endpoint({ blockingTrigger: { eventType: v1events.BEFORE_CREATE_EVENT } });
+
+        await fab.createV1Function(ep, new scraper.SourceTokenScraper());
+
+        expect(gcf.setInvokerCreate).to.have.been.calledWith(ep.project, backend.functionName(ep), [
+          "public",
+        ]);
+      });
     });
 
     it("doesn't set invoker on non-http functions", async () => {
       gcf.createFunction.resolves({ name: "op", type: "create", done: false });
       poller.pollOperation.resolves();
       gcf.setInvokerCreate.resolves();
-      const ep = endpoint({
+      const ep0 = endpoint({
         scheduleTrigger: {},
       });
+      const ep1 = endpoint({
+        eventTrigger: {
+          eventType: "some.event",
+          eventFilters: { resource: "some-resource" },
+          retry: false,
+        },
+      });
 
-      await fab.createV1Function(ep, new scraper.SourceTokenScraper());
+      await fab.createV1Function(ep0, new scraper.SourceTokenScraper());
+      await fab.createV1Function(ep1, new scraper.SourceTokenScraper());
       expect(gcf.setInvokerCreate).to.not.have.been.called;
     });
   });
@@ -240,15 +357,33 @@ describe("Fabricator", () => {
       gcf.updateFunction.resolves({ name: "op", type: "create", done: false });
       poller.pollOperation.resolves();
       gcf.setInvokerUpdate.resolves();
-      const ep = endpoint({
+      const ep0 = endpoint({
         httpsTrigger: {
           invoker: ["custom@"],
         },
       });
+      const ep1 = endpoint({
+        taskQueueTrigger: {
+          invoker: ["custom@"],
+        },
+      });
+      const ep2 = endpoint({
+        blockingTrigger: {
+          eventType: v1events.BEFORE_CREATE_EVENT,
+        },
+      });
 
-      await fab.updateV1Function(ep, new scraper.SourceTokenScraper());
-      expect(gcf.setInvokerUpdate).to.have.been.calledWith(ep.project, backend.functionName(ep), [
+      await fab.updateV1Function(ep0, new scraper.SourceTokenScraper());
+      await fab.updateV1Function(ep1, new scraper.SourceTokenScraper());
+      await fab.updateV1Function(ep2, new scraper.SourceTokenScraper());
+      expect(gcf.setInvokerUpdate).to.have.been.calledWith(ep0.project, backend.functionName(ep0), [
         "custom@",
+      ]);
+      expect(gcf.setInvokerUpdate).to.have.been.calledWith(ep1.project, backend.functionName(ep1), [
+        "custom@",
+      ]);
+      expect(gcf.setInvokerUpdate).to.have.been.calledWith(ep2.project, backend.functionName(ep2), [
+        "public",
       ]);
     });
 
@@ -290,14 +425,14 @@ describe("Fabricator", () => {
   });
 
   describe("createV2Function", () => {
-    let setConcurrency: sinon.SinonStub;
+    let setRunTraits: sinon.SinonStub;
 
     beforeEach(() => {
-      setConcurrency = sinon.stub(fab, "setConcurrency");
-      setConcurrency.resolves();
+      setRunTraits = sinon.stub(fab, "setRunTraits");
+      setRunTraits.resolves();
     });
 
-    it("handles topiocs that already exist", async () => {
+    it("handles topics that already exist", async () => {
       pubsub.createTopic.callsFake(() => {
         const err = new Error("Already exists");
         (err as any).status = 409;
@@ -309,10 +444,8 @@ describe("Fabricator", () => {
       const ep = endpoint(
         {
           eventTrigger: {
-            eventType: gcfv2.PUBSUB_PUBLISH_EVENT,
-            eventFilters: {
-              resource: "topic",
-            },
+            eventType: v2events.PUBSUB_PUBLISH_EVENT,
+            eventFilters: { topic: "topic" },
             retry: false,
           },
         },
@@ -332,10 +465,8 @@ describe("Fabricator", () => {
       const ep = endpoint(
         {
           eventTrigger: {
-            eventType: gcfv2.PUBSUB_PUBLISH_EVENT,
-            eventFilters: {
-              resource: "topic",
-            },
+            eventType: v2events.PUBSUB_PUBLISH_EVENT,
+            eventFilters: { topic: "topic" },
             retry: false,
           },
         },
@@ -374,66 +505,180 @@ describe("Fabricator", () => {
       );
     });
 
-    it("sets invoker and concurrency by default", async () => {
-      gcfv2.createFunction.resolves({ name: "op", done: false });
-      poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
-      run.setInvokerCreate.resolves();
-      const ep = endpoint({ httpsTrigger: {} }, { platform: "gcfv2" });
-
-      await fab.createV2Function(ep);
-      expect(run.setInvokerCreate).to.have.been.calledWith(ep.project, "service", ["public"]);
-      expect(setConcurrency).to.have.been.calledWith(ep, "service", 80);
-    });
-
-    it("sets explicit invoker", async () => {
+    it("sets run traits by default for large functions", async () => {
       gcfv2.createFunction.resolves({ name: "op", done: false });
       poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
       run.setInvokerCreate.resolves();
       const ep = endpoint(
-        {
-          httpsTrigger: {
-            invoker: ["custom@"],
-          },
-        },
-        { platform: "gcfv2" }
+        { httpsTrigger: {} },
+        { platform: "gcfv2", availableMemoryMb: 256, cpu: 1 }
       );
 
       await fab.createV2Function(ep);
-      expect(run.setInvokerCreate).to.have.been.calledWith(ep.project, "service", ["custom@"]);
+      expect(setRunTraits).to.have.been.calledWith("service", ep);
     });
 
-    it("doesn't set private invoker on create", async () => {
+    it("sets run traits for functions with concurrency", async () => {
       gcfv2.createFunction.resolves({ name: "op", done: false });
       poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
       run.setInvokerCreate.resolves();
-      const ep = endpoint({ httpsTrigger: { invoker: ["private"] } }, { platform: "gcfv2" });
+      const ep = endpoint(
+        { httpsTrigger: {} },
+        { platform: "gcfv2", availableMemoryMb: 2048, cpu: 1, concurrency: 80 }
+      );
 
       await fab.createV2Function(ep);
-      expect(gcf.setInvokerCreate).to.not.have.been.called;
+      expect(setRunTraits).to.have.been.calledWith("service", ep);
     });
 
-    it("doesn't set invoker on non-http functions", async () => {
+    it("does not set concurrency by default for small functions", async () => {
       gcfv2.createFunction.resolves({ name: "op", done: false });
       poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
       run.setInvokerCreate.resolves();
-      const ep = endpoint({ scheduleTrigger: {} }, { platform: "gcfv2" });
+      const ep = endpoint(
+        { httpsTrigger: {} },
+        {
+          platform: "gcfv2",
+          availableMemoryMb: 256,
+          cpu: backend.memoryToGen1Cpu(256),
+          concurrency: 1,
+        }
+      );
 
       await fab.createV2Function(ep);
-      expect(run.setInvokerCreate).to.not.have.been.called;
+      expect(run.setInvokerCreate).to.have.been.calledWith(ep.project, "service", ["public"]);
+      expect(setRunTraits).to.not.have.been.called;
     });
 
     it("sets explicit concurrency", async () => {
       gcfv2.createFunction.resolves({ name: "op", done: false });
       poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
       run.setInvokerCreate.resolves();
-      const ep = endpoint({ httpsTrigger: {} }, { platform: "gcfv2", concurrency: 1 });
+      const ep = endpoint(
+        { httpsTrigger: {} },
+        { platform: "gcfv2", availableMemoryMb: 2048, cpu: 1, concurrency: 2 }
+      );
 
       await fab.createV2Function(ep);
-      expect(setConcurrency).to.have.been.calledWith(ep, "service", 1);
+      expect(setRunTraits).to.have.been.calledWith("service", ep);
+    });
+
+    describe("httpsTrigger", () => {
+      it("sets invoker to public by default", async () => {
+        gcfv2.createFunction.resolves({ name: "op", done: false });
+        poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
+        run.setInvokerCreate.resolves();
+        const ep = endpoint({ httpsTrigger: {} }, { platform: "gcfv2" });
+
+        await fab.createV2Function(ep);
+        expect(run.setInvokerCreate).to.have.been.calledWith(ep.project, "service", ["public"]);
+      });
+
+      it("sets explicit invoker", async () => {
+        gcfv2.createFunction.resolves({ name: "op", done: false });
+        poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
+        run.setInvokerCreate.resolves();
+        const ep = endpoint(
+          {
+            httpsTrigger: {
+              invoker: ["custom@"],
+            },
+          },
+          { platform: "gcfv2" }
+        );
+
+        await fab.createV2Function(ep);
+        expect(run.setInvokerCreate).to.have.been.calledWith(ep.project, "service", ["custom@"]);
+      });
+
+      it("doesn't set private invoker on create", async () => {
+        gcfv2.createFunction.resolves({ name: "op", done: false });
+        poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
+        run.setInvokerCreate.resolves();
+        const ep = endpoint({ httpsTrigger: { invoker: ["private"] } }, { platform: "gcfv2" });
+
+        await fab.createV2Function(ep);
+        expect(run.setInvokerCreate).to.not.have.been.called;
+      });
+    });
+
+    describe("callableTrigger", () => {
+      it("always sets invoker to public", async () => {
+        gcfv2.createFunction.resolves({ name: "op", done: false });
+        poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
+        run.setInvokerCreate.resolves();
+        const ep = endpoint({ callableTrigger: {} }, { platform: "gcfv2" });
+
+        await fab.createV2Function(ep);
+        expect(run.setInvokerCreate).to.have.been.calledWith(ep.project, "service", ["public"]);
+      });
+    });
+
+    describe("taskQueueTrigger", () => {
+      it("doesn't set invoker by default", async () => {
+        gcfv2.createFunction.resolves({ name: "op", done: false });
+        poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
+        run.setInvokerCreate.resolves();
+        const ep = endpoint({ taskQueueTrigger: {} }, { platform: "gcfv2" });
+
+        await fab.createV2Function(ep);
+        expect(run.setInvokerCreate).to.not.have.been.called;
+      });
+
+      it("sets explicit invoker", async () => {
+        gcfv2.createFunction.resolves({ name: "op", done: false });
+        poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
+        run.setInvokerCreate.resolves();
+        const ep = endpoint(
+          {
+            taskQueueTrigger: {
+              invoker: ["custom@"],
+            },
+          },
+          { platform: "gcfv2" }
+        );
+        await fab.createV2Function(ep);
+        expect(run.setInvokerCreate).to.have.been.calledWith(ep.project, "service", ["custom@"]);
+      });
+    });
+
+    describe("blockingTrigger", () => {
+      it("always sets invoker to public", async () => {
+        gcfv2.createFunction.resolves({ name: "op", done: false });
+        poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
+        run.setInvokerCreate.resolves();
+        const ep = endpoint(
+          { blockingTrigger: { eventType: v1events.BEFORE_CREATE_EVENT } },
+          { platform: "gcfv2" }
+        );
+
+        await fab.createV2Function(ep);
+        expect(run.setInvokerCreate).to.have.been.calledWith(ep.project, "service", ["public"]);
+      });
+    });
+
+    it("doesn't set invoker on non-http functions", async () => {
+      gcfv2.createFunction.resolves({ name: "op", done: false });
+      poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
+      run.setInvokerCreate.resolves();
+      const ep = endpoint(
+        { eventTrigger: { eventType: "event", eventFilters: {}, retry: false } },
+        { platform: "gcfv2" }
+      );
+
+      await fab.createV2Function(ep);
+      expect(run.setInvokerCreate).to.not.have.been.called;
     });
   });
 
   describe("updateV2Function", () => {
+    let setRunTraits: sinon.SinonStub;
+
+    beforeEach(() => {
+      setRunTraits = sinon.stub(fab, "setRunTraits");
+      setRunTraits.rejects(new Error("Unexpected setRunTraits call"));
+    });
+
     it("throws on update function failure", async () => {
       gcfv2.updateFunction.rejects(new Error("Server failure"));
 
@@ -457,7 +702,7 @@ describe("Fabricator", () => {
       );
     });
 
-    it("sets explicit invoker", async () => {
+    it("sets explicit invoker on httpsTrigger", async () => {
       gcfv2.updateFunction.resolves({ name: "op", done: false });
       poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
       run.setInvokerUpdate.resolves();
@@ -474,6 +719,40 @@ describe("Fabricator", () => {
       expect(run.setInvokerUpdate).to.have.been.calledWith(ep.project, "service", ["custom@"]);
     });
 
+    it("sets explicit invoker on taskQueueTrigger", async () => {
+      gcfv2.updateFunction.resolves({ name: "op", done: false });
+      poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
+      run.setInvokerUpdate.resolves();
+      const ep = endpoint(
+        {
+          taskQueueTrigger: {
+            invoker: ["custom@"],
+          },
+        },
+        { platform: "gcfv2" }
+      );
+
+      await fab.updateV2Function(ep);
+      expect(run.setInvokerUpdate).to.have.been.calledWith(ep.project, "service", ["custom@"]);
+    });
+
+    it("sets explicit invoker on blockingTrigger", async () => {
+      gcfv2.updateFunction.resolves({ name: "op", done: false });
+      poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
+      run.setInvokerUpdate.resolves();
+      const ep = endpoint(
+        {
+          blockingTrigger: {
+            eventType: v1events.BEFORE_CREATE_EVENT,
+          },
+        },
+        { platform: "gcfv2" }
+      );
+
+      await fab.updateV2Function(ep);
+      expect(run.setInvokerUpdate).to.have.been.calledWith(ep.project, "service", ["public"]);
+    });
+
     it("does not set invoker by default", async () => {
       gcfv2.updateFunction.resolves({ name: "op", done: false });
       poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
@@ -488,10 +767,34 @@ describe("Fabricator", () => {
       gcfv2.updateFunction.resolves({ name: "op", done: false });
       poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
       run.setInvokerUpdate.resolves();
-      const ep = endpoint({ scheduleTrigger: {} }, { platform: "gcfv2" });
+      const ep = endpoint(
+        { eventTrigger: { eventType: "event", eventFilters: {}, retry: false } },
+        { platform: "gcfv2" }
+      );
 
       await fab.updateV2Function(ep);
       expect(run.setInvokerUpdate).to.not.have.been.called;
+    });
+
+    it("Reapplies customer VM preferences after GCF overwrite", async () => {
+      setRunTraits.resolves();
+      gcfv2.updateFunction.resolves({ name: "op", done: false });
+      poller.pollOperation.resolves({ serviceConfig: { service: "service" } });
+      run.setInvokerUpdate.resolves();
+      const ep = endpoint(
+        { httpsTrigger: {} },
+        {
+          platform: "gcfv2",
+          availableMemoryMb: 256,
+          cpu: 1,
+        }
+      );
+
+      await fab.updateV2Function(ep);
+      expect(setRunTraits).to.have.been.calledWithMatch("service", {
+        cpu: 1,
+        concurrency: backend.DEFAULT_CONCURRENCY,
+      });
     });
   });
 
@@ -509,12 +812,12 @@ describe("Fabricator", () => {
     });
   });
 
-  describe("setConcurrency", () => {
+  describe("setRunTraits", () => {
     let service: runNS.Service;
     beforeEach(() => {
       service = {
         apiVersion: "serving.knative.dev/v1",
-        kind: "service",
+        kind: "Service",
         metadata: {
           name: "service",
           namespace: "project",
@@ -526,7 +829,25 @@ describe("Fabricator", () => {
               namespace: "project",
             },
             spec: {
-              containerConcurrency: 80,
+              containerConcurrency: 1,
+              containers: [
+                {
+                  image: "image",
+                  ports: [
+                    {
+                      name: "main",
+                      containerPort: 8080,
+                    },
+                  ],
+                  env: {},
+                  resources: {
+                    limits: {
+                      memory: "256M",
+                      cpu: "0.1667",
+                    },
+                  },
+                },
+              ],
             },
           },
           traffic: [],
@@ -534,41 +855,70 @@ describe("Fabricator", () => {
       };
     });
 
-    it("sets concurrency when necessary", async () => {
+    it("replaces the service to set concurrency", async () => {
       run.getService.resolves(service);
-      run.replaceService.callsFake((name: string, svc: runNS.Service) => {
-        expect(svc.spec.template.spec.containerConcurrency).equals(1);
-        // Run throws if this field is set
-        expect(svc.spec.template.metadata.name).is.undefined;
-        return Promise.resolve(service);
-      });
-
-      await fab.setConcurrency(endpoint(), "service", 1);
-      expect(run.replaceService).to.have.been.called;
+      run.updateService.resolves(service);
+      await fab.setRunTraits(
+        service.metadata.name,
+        endpoint(
+          { httpsTrigger: {} },
+          {
+            cpu: 1,
+            concurrency: 80,
+          }
+        )
+      );
+      expect(run.updateService).to.have.been.called;
     });
 
-    it("doesn't set concurrency when already at the correct value", async () => {
+    it("replaces the service to set CPU", async () => {
+      service.spec.template.spec.containers[0].resources.limits.cpu = (1 / 6).toString();
+      run.getService.resolves(service);
+      run.updateService.resolves(service);
+      await fab.setRunTraits(
+        service.metadata.name,
+        endpoint(
+          { httpsTrigger: {} },
+          {
+            cpu: 1,
+            concurrency: 1,
+          }
+        )
+      );
+      expect(run.updateService).to.have.been.called;
+    });
+
+    it("doesn't setRunTraits when already at the correct value", async () => {
+      service.spec.template.spec.containerConcurrency = 80;
+      service.spec.template.spec.containers[0].resources.limits.cpu = "1";
       run.getService.resolves(service);
 
-      await fab.setConcurrency(
-        endpoint(),
+      await fab.setRunTraits(
         "service",
-        service.spec.template.spec.containerConcurrency!
+        endpoint(
+          {
+            httpsTrigger: {},
+          },
+          {
+            cpu: 1,
+            concurrency: 80,
+          }
+        )
       );
-      expect(run.replaceService).to.not.have.been.called;
+      expect(run.updateService).to.not.have.been.called;
     });
 
     it("wraps errors", async () => {
       run.getService.rejects(new Error("Oh noes!"));
 
-      await expect(fab.setConcurrency(endpoint(), "service", 1)).to.eventually.be.rejectedWith(
+      await expect(fab.setRunTraits("service", endpoint())).to.eventually.be.rejectedWith(
         reporter.DeploymentError,
         "set concurrency"
       );
 
       run.getService.resolves(service);
       run.replaceService.rejects(new Error("read only"));
-      await expect(fab.setConcurrency(endpoint(), "service", 1)).to.eventually.be.rejectedWith(
+      await expect(fab.setRunTraits("service", endpoint())).to.eventually.be.rejectedWith(
         reporter.DeploymentError,
         "set concurrency"
       );
@@ -591,6 +941,31 @@ describe("Fabricator", () => {
     it("wraps errors", async () => {
       scheduler.createOrReplaceJob.rejects(new Error("Fail"));
       await expect(fab.upsertScheduleV1(ep)).to.eventually.be.rejectedWith(
+        reporter.DeploymentError,
+        "upsert schedule"
+      );
+    });
+  });
+
+  describe("upsertScheduleV2", () => {
+    const ep = {
+      ...endpoint({
+        scheduleTrigger: {
+          schedule: "every 5 minutes",
+        },
+      }),
+      platform: "gcfv2",
+    } as backend.Endpoint & backend.ScheduleTriggered;
+
+    it("upserts schedules", async () => {
+      scheduler.createOrReplaceJob.resolves();
+      await fab.upsertScheduleV2(ep);
+      expect(scheduler.createOrReplaceJob).to.have.been.called;
+    });
+
+    it("wraps errors", async () => {
+      scheduler.createOrReplaceJob.rejects(new Error("Fail"));
+      await expect(fab.upsertScheduleV2(ep)).to.eventually.be.rejectedWith(
         reporter.DeploymentError,
         "upsert schedule"
       );
@@ -624,6 +999,31 @@ describe("Fabricator", () => {
       await expect(fab.deleteScheduleV1(ep)).to.eventually.be.rejectedWith(
         reporter.DeploymentError,
         "delete topic"
+      );
+    });
+  });
+
+  describe("deleteScheduleV2", () => {
+    const ep = {
+      ...endpoint({
+        scheduleTrigger: {
+          schedule: "every 5 minutes",
+        },
+      }),
+      platform: "gcfv2",
+    } as backend.Endpoint & backend.ScheduleTriggered;
+
+    it("deletes schedules and topics", async () => {
+      scheduler.deleteJob.resolves();
+      await fab.deleteScheduleV2(ep);
+      expect(scheduler.deleteJob).to.have.been.called;
+    });
+
+    it("wraps errors", async () => {
+      scheduler.deleteJob.rejects(new Error("Fail"));
+      await expect(fab.deleteScheduleV2(ep)).to.eventually.be.rejectedWith(
+        reporter.DeploymentError,
+        "delete schedule"
       );
     });
   });
@@ -700,6 +1100,68 @@ describe("Fabricator", () => {
     });
   });
 
+  describe("registerBlockingTrigger", () => {
+    const ep = endpoint(
+      {
+        blockingTrigger: {
+          eventType: v1events.BEFORE_CREATE_EVENT,
+        },
+      },
+      { uri: "myuri.net" }
+    ) as backend.Endpoint & backend.BlockingTriggered;
+    const authBlockingService = new AuthBlockingService();
+
+    it("registers auth blocking trigger", async () => {
+      services.serviceForEndpoint.returns(authBlockingService);
+      identityPlatform.getBlockingFunctionsConfig.resolves({});
+      identityPlatform.setBlockingFunctionsConfig.resolves({});
+      await fab.registerBlockingTrigger(ep);
+      expect(identityPlatform.getBlockingFunctionsConfig).to.have.been.called;
+      expect(identityPlatform.setBlockingFunctionsConfig).to.have.been.called;
+    });
+
+    it("wraps errors", async () => {
+      services.serviceForEndpoint.returns(authBlockingService);
+      identityPlatform.getBlockingFunctionsConfig.rejects(new Error("Fail"));
+      await expect(fab.registerBlockingTrigger(ep)).to.eventually.be.rejectedWith(
+        reporter.DeploymentError,
+        "register blocking trigger"
+      );
+    });
+  });
+
+  describe("unregisterBlockingTrigger", () => {
+    const ep = endpoint(
+      {
+        blockingTrigger: {
+          eventType: v1events.BEFORE_CREATE_EVENT,
+        },
+      },
+      { uri: "myuri.net" }
+    ) as backend.Endpoint & backend.BlockingTriggered;
+    const authBlockingService = new AuthBlockingService();
+
+    it("unregisters auth blocking trigger", async () => {
+      services.serviceForEndpoint.returns(authBlockingService);
+      identityPlatform.getBlockingFunctionsConfig.resolves({
+        triggers: { beforeCreate: { functionUri: "myuri.net" } },
+      });
+      identityPlatform.setBlockingFunctionsConfig.resolves({});
+      await fab.unregisterBlockingTrigger(ep);
+      expect(identityPlatform.getBlockingFunctionsConfig).to.have.been.called;
+      expect(identityPlatform.setBlockingFunctionsConfig).to.have.been.called;
+    });
+
+    it("wraps errors", async () => {
+      services.serviceForEndpoint.returns(authBlockingService);
+      identityPlatform.getBlockingFunctionsConfig.rejects(new Error("Fail"));
+      await expect(fab.unregisterBlockingTrigger(ep)).to.eventually.be.rejectedWith(
+        reporter.DeploymentError,
+        "unregister blocking trigger"
+      );
+    });
+  });
+
   describe("setTrigger", () => {
     it("does nothing for HTTPS functions", async () => {
       // all APIs throw by default
@@ -710,10 +1172,8 @@ describe("Fabricator", () => {
       // all APIs throw by default
       const ep = endpoint({
         eventTrigger: {
-          eventType: gcfNSV2.PUBSUB_PUBLISH_EVENT,
-          eventFilters: {
-            resource: "topic",
-          },
+          eventType: v2events.PUBSUB_PUBLISH_EVENT,
+          eventFilters: { topic: "topic" },
           retry: false,
         },
       });
@@ -763,10 +1223,8 @@ describe("Fabricator", () => {
       // all APIs throw by default
       const ep = endpoint({
         eventTrigger: {
-          eventType: gcfNSV2.PUBSUB_PUBLISH_EVENT,
-          eventFilters: {
-            resource: "topic",
-          },
+          eventType: v2events.PUBSUB_PUBLISH_EVENT,
+          eventFilters: { topic: "topic" },
           retry: false,
         },
       });
@@ -961,10 +1419,11 @@ describe("Fabricator", () => {
       const ep1 = endpoint({ httpsTrigger: {} }, { id: "A" });
       const ep2 = endpoint({ httpsTrigger: {} }, { id: "B" });
       const ep3 = endpoint({ httpsTrigger: {} }, { id: "C" });
-      const changes: planner.RegionalChanges = {
+      const changes: planner.Changeset = {
         endpointsToCreate: [ep1, ep2],
         endpointsToUpdate: [{ endpoint: ep3 }],
         endpointsToDelete: [],
+        endpointsToSkip: [],
       };
 
       let sourceTokenScraper: scraper.SourceTokenScraper | undefined;
@@ -987,21 +1446,57 @@ describe("Fabricator", () => {
       const updateEndpoint = sinon.stub(fab, "updateEndpoint");
       updateEndpoint.callsFake(fakeUpsert);
 
-      await fab.applyRegionalChanges(changes);
+      await fab.applyChangeset(changes);
     });
 
     it("handles errors and wraps them in results", async () => {
       // when it hits a real API it will fail.
       const ep = endpoint();
-      const changes: planner.RegionalChanges = {
+      const changes: planner.Changeset = {
         endpointsToCreate: [ep],
         endpointsToUpdate: [],
         endpointsToDelete: [],
+        endpointsToSkip: [],
       };
 
-      const results = await fab.applyRegionalChanges(changes);
+      const results = await fab.applyChangeset(changes);
       expect(results[0].error).to.be.instanceOf(reporter.DeploymentError);
       expect(results[0].error?.message).to.match(/create function/);
+    });
+  });
+
+  describe("getLogSuccessMessage", () => {
+    it("should return appropriate messaging for create case", () => {
+      const ep = endpoint({ httpsTrigger: {} }, { id: "potato" });
+
+      const message = fab.getLogSuccessMessage("create", ep);
+
+      expect(message).to.contain(`functions[potato(us-central1)]`);
+      expect(message).to.contain(`Successful create operation`);
+    });
+
+    it("should return appropriate messaging for skip case", () => {
+      const ep = endpoint({ httpsTrigger: {} }, { id: "tomato" });
+      ep.hash = "hashyhash";
+
+      const message = fab.getLogSuccessMessage("skip", ep);
+
+      expect(message).to.contain(`functions[tomato(us-central1)]`);
+      expect(message).to.contain(`Skipped (No changes detected)`);
+    });
+  });
+
+  describe("getSkippedDeployingNopOpMessage", () => {
+    it("should return appropriate messaging", () => {
+      const ep1 = endpoint({ httpsTrigger: {} }, { id: "function1" });
+      const ep2 = endpoint({ httpsTrigger: {} }, { id: "function2" });
+
+      const message = fab.getSkippedDeployingNopOpMessage([ep1, ep2]);
+
+      expect(message).to.contain(`functions:`);
+      expect(message).to.contain(`You can re-deploy skipped functions with:`);
+      expect(message).to.contain(`firebase deploy --only functions:function1,function2`);
+      expect(message).to.contain(`FUNCTIONS_DEPLOY_UNCHANGED=true firebase deploy`);
     });
   });
 
@@ -1009,13 +1504,14 @@ describe("Fabricator", () => {
     // when it hits a real API it will fail.
     const createEP = endpoint({ httpsTrigger: {} }, { id: "A" });
     const deleteEP = endpoint({ httpsTrigger: {} }, { id: "B" });
-    const changes: planner.RegionalChanges = {
+    const changes: planner.Changeset = {
       endpointsToCreate: [createEP],
       endpointsToUpdate: [],
       endpointsToDelete: [deleteEP],
+      endpointsToSkip: [],
     };
 
-    const results = await fab.applyRegionalChanges(changes);
+    const results = await fab.applyChangeset(changes);
     const result = results.find((r) => r.endpoint.id === deleteEP.id);
     expect(result?.error).to.be.instanceOf(reporter.AbortedDeploymentError);
     expect(result?.durationMs).to.equal(0);
@@ -1025,11 +1521,13 @@ describe("Fabricator", () => {
     const createEP = endpoint({ httpsTrigger: {} }, { id: "A" });
     const updateEP = endpoint({ httpsTrigger: {} }, { id: "B" });
     const deleteEP = endpoint({ httpsTrigger: {} }, { id: "C" });
+    const skipEP = endpoint({ httpsTrigger: {} }, { id: "D" });
     const update: planner.EndpointUpdate = { endpoint: updateEP };
-    const changes: planner.RegionalChanges = {
+    const changes: planner.Changeset = {
       endpointsToCreate: [createEP],
       endpointsToUpdate: [update],
       endpointsToDelete: [deleteEP],
+      endpointsToSkip: [skipEP],
     };
 
     const createEndpoint = sinon.stub(fab, "createEndpoint");
@@ -1039,7 +1537,7 @@ describe("Fabricator", () => {
     const deleteEndpoint = sinon.stub(fab, "deleteEndpoint");
     deleteEndpoint.resolves();
 
-    const results = await fab.applyRegionalChanges(changes);
+    const results = await fab.applyChangeset(changes);
     expect(createEndpoint).to.have.been.calledWithMatch(createEP);
     expect(updateEndpoint).to.have.been.calledWithMatch(update);
     expect(deleteEndpoint).to.have.been.calledWith(deleteEP);
@@ -1060,17 +1558,19 @@ describe("Fabricator", () => {
           endpointsToCreate: [ep1],
           endpointsToUpdate: [],
           endpointsToDelete: [],
+          endpointsToSkip: [],
         },
         "us-west1": {
           endpointsToCreate: [],
           endpointsToUpdate: [],
           endpointsToDelete: [ep2],
+          endpointsToSkip: [],
         },
       };
 
       // Will fail when it hits actual API calls
       const summary = await fab.applyPlan(plan);
-      const ep1Result = summary.results.find((r) => r.endpoint.region == ep1.region);
+      const ep1Result = summary.results.find((r) => r.endpoint.region === ep1.region);
       expect(ep1Result?.error).to.be.instanceOf(reporter.DeploymentError);
       expect(ep1Result?.error?.message).to.match(/create function/);
 

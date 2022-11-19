@@ -4,11 +4,19 @@ set -e # Immediately exit on failure
 # Globally link the CLI for the testing framework
 ./scripts/npm-link.sh
 
+# Set application default credentials.
+source scripts/set-default-credentials.sh
+
 # Prepare the storage emulator rules runtime
 firebase setup:emulators:storage
 
-mocha \
-  --require ts-node/register \
-  --require source-map-support/register \
-  --require src/test/helpers/mocha-bootstrap.ts \
-  scripts/storage-emulator-integration/tests.ts
+mocha scripts/storage-emulator-integration/rules/*.test.ts
+
+mocha scripts/storage-emulator-integration/import/tests.ts
+
+mocha scripts/storage-emulator-integration/internal/tests.ts
+
+mocha scripts/storage-emulator-integration/multiple-targets/tests.ts
+
+mocha scripts/storage-emulator-integration/conformance/*.test.ts
+

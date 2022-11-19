@@ -1,8 +1,8 @@
 import * as backend from "../backend";
-import * as clc from "cli-color";
+import * as clc from "colorette";
 
 import { logger } from "../../../logger";
-import * as track from "../../../track";
+import { track } from "../../../track";
 import * as utils from "../../../utils";
 import { getFunctionLabel } from "../functionsDeployHelper";
 
@@ -19,6 +19,7 @@ export interface Summary {
 
 export type OperationType =
   | "create"
+  | "skip"
   | "update"
   | "delete"
   | "upsert schedule"
@@ -28,7 +29,9 @@ export type OperationType =
   | "create topic"
   | "delete topic"
   | "set invoker"
-  | "set concurrency";
+  | "set concurrency"
+  | "register blocking trigger"
+  | "unregister blocking trigger";
 
 /** An error with a deployment phase. */
 export class DeploymentError extends Error {
@@ -66,23 +69,23 @@ export async function logAndTrackDeployStats(summary: Summary): Promise<void> {
     totalTime += result.durationMs;
     if (!result.error) {
       totalSuccesses++;
-      reports.push(track.track("function_deploy_success", tag, result.durationMs));
+      reports.push(track("function_deploy_success", tag, result.durationMs));
     } else if (result.error instanceof AbortedDeploymentError) {
       totalAborts++;
-      reports.push(track.track("function_deploy_abort", tag, result.durationMs));
+      reports.push(track("function_deploy_abort", tag, result.durationMs));
     } else {
       totalErrors++;
-      reports.push(track.track("function_deploy_failure", tag, result.durationMs));
+      reports.push(track("function_deploy_failure", tag, result.durationMs));
     }
   }
 
   const regionCountTag = regions.size < 5 ? regions.size.toString() : ">=5";
-  reports.push(track.track("functions_region_count", regionCountTag, 1));
+  reports.push(track("functions_region_count", regionCountTag, 1));
 
   const gcfv1 = summary.results.find((r) => r.endpoint.platform === "gcfv1");
   const gcfv2 = summary.results.find((r) => r.endpoint.platform === "gcfv2");
   const tag = gcfv1 && gcfv2 ? "v1+v2" : gcfv1 ? "v1" : "v2";
-  reports.push(track.track("functions_codebase_deploy", tag, summary.results.length));
+  reports.push(track("functions_codebase_deploy", tag, summary.results.length));
 
   const avgTime = totalTime / (totalSuccesses + totalErrors);
 
@@ -93,19 +96,19 @@ export async function logAndTrackDeployStats(summary: Summary): Promise<void> {
   logger.debug(`Average Function Deployment time: ${avgTime}`);
   if (totalErrors + totalSuccesses > 0) {
     if (totalErrors === 0) {
-      reports.push(track.track("functions_deploy_result", "success", totalSuccesses));
+      reports.push(track("functions_deploy_result", "success", totalSuccesses));
     } else if (totalSuccesses > 0) {
-      reports.push(track.track("functions_deploy_result", "partial_success", totalSuccesses));
-      reports.push(track.track("functions_deploy_result", "partial_failure", totalErrors));
+      reports.push(track("functions_deploy_result", "partial_success", totalSuccesses));
+      reports.push(track("functions_deploy_result", "partial_failure", totalErrors));
       reports.push(
-        track.track(
+        track(
           "functions_deploy_result",
           "partial_error_ratio",
           totalErrors / (totalSuccesses + totalErrors)
         )
       );
     } else {
-      reports.push(track.track("functions_deploy_result", "failure", totalErrors));
+      reports.push(track("functions_deploy_result", "failure", totalErrors));
     }
   }
 
@@ -233,11 +236,20 @@ export function triggerTag(endpoint: backend.Endpoint): string {
     return `${prefix}.taskQueue`;
   }
 
+  if (backend.isCallableTriggered(endpoint)) {
+    return `${prefix}.callable`;
+  }
+
   if (backend.isHttpsTriggered(endpoint)) {
+    // NOTE: Legacy trigger annotation relies on a special label to differentiate http vs callable triggers.
     if (endpoint.labels?.["deployment-callable"]) {
       return `${prefix}.callable`;
     }
     return `${prefix}.https`;
+  }
+
+  if (backend.isBlockingTriggered(endpoint)) {
+    return `${prefix}.blocking`;
   }
 
   return endpoint.eventTrigger.eventType;

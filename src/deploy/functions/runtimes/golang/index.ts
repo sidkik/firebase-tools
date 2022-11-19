@@ -2,13 +2,12 @@ import { promisify } from "util";
 import fetch from "node-fetch";
 import * as fs from "fs";
 import * as path from "path";
-import * as portfinder from "portfinder";
 import * as spawn from "cross-spawn";
 
 import { FirebaseError } from "../../../../error";
 import { logger } from "../../../../logger";
 import * as backend from "../../backend";
-import * as discovery from "../discovery";
+import * as build from "../../build";
 import * as gomod from "./gomod";
 import * as runtimes from "..";
 
@@ -23,6 +22,9 @@ export const FUNCTIONS_SDK = "github.com/FirebaseExtended/firebase-functions-go"
 export const FUNCTIONS_CODEGEN = FUNCTIONS_SDK + "/support/codegen";
 export const FUNCTIONS_RUNTIME = FUNCTIONS_SDK + "/support/runtime";
 
+/**
+ *
+ */
 export async function tryCreateDelegate(
   context: runtimes.DelegateContext
 ): Promise<Delegate | undefined> {
@@ -81,13 +83,14 @@ export class Delegate {
     const genBinary = spawn.sync("go", ["run", FUNCTIONS_CODEGEN, this.module.module], {
       cwd: this.sourceDir,
       env: {
+        ...process.env,
         HOME: process.env.HOME,
         PATH: process.env.PATH,
         GOPATH: process.env.GOPATH,
       },
       stdio: [/* stdin=*/ "ignore", /* stdout=*/ "pipe", /* stderr=*/ "pipe"],
     });
-    if (genBinary.status != 0) {
+    if (genBinary.status !== 0) {
       throw new FirebaseError("Failed to run codegen", {
         children: [new Error(genBinary.stderr.toString())],
       });
@@ -110,6 +113,7 @@ export class Delegate {
   ): Promise<() => Promise<void>> {
     const childProcess = spawn("go", ["run", "./autogen"], {
       env: {
+        ...process.env,
         ...envs,
         PORT: port.toString(),
         ADMIN_PORT: adminPort.toString(),
@@ -120,7 +124,7 @@ export class Delegate {
       cwd: this.sourceDir,
       stdio: [/* stdin=*/ "ignore", /* stdout=*/ "pipe", /* stderr=*/ "inherit"],
     });
-    childProcess.stdout.on("data", (chunk) => {
+    childProcess.stdout?.on("data", (chunk) => {
       logger.debug(chunk.toString());
     });
     return Promise.resolve(async () => {
@@ -131,7 +135,7 @@ export class Delegate {
 
       // If we SIGKILL the child process we're actually going to kill the go
       // runner and the webserver it launched will keep running.
-      await fetch(`http://localhost:${adminPort}/quitquitquit`);
+      await fetch(`http://localhost:${adminPort}/__/quitquitquit`);
       setTimeout(() => {
         if (!childProcess.killed) {
           childProcess.kill("SIGKILL");
@@ -141,25 +145,8 @@ export class Delegate {
     });
   }
 
-  async discoverSpec(
-    configValues: backend.RuntimeConfigValues,
-    envs: backend.EnvironmentVariables
-  ): Promise<backend.Backend> {
-    let discovered = await discovery.detectFromYaml(this.sourceDir, this.projectId, this.runtime);
-    if (!discovered) {
-      const getPort = promisify(portfinder.getPort) as () => Promise<number>;
-      const port = await getPort();
-      (portfinder as any).basePort = port + 1;
-      const adminPort = await getPort();
-
-      const kill = await this.serve(port, adminPort, envs);
-      try {
-        discovered = await discovery.detectFromPort(adminPort, this.projectId, this.runtime);
-      } finally {
-        await kill();
-      }
-    }
-    discovered.environmentVariables = envs;
-    return discovered;
+  async discoverBuild(): Promise<build.Build> {
+    // Unimplemented. Build discovery is not currently supported in Go.
+    return Promise.resolve({ requiredAPIs: [], endpoints: {}, params: [] });
   }
 }
