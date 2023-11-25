@@ -1,13 +1,19 @@
 import * as clc from "colorette";
 import * as fs from "fs";
 import { sync as rimraf } from "rimraf";
+import { join } from "path";
 
 import { Client } from "../../../apiv2";
 import { initGitHub } from "./github";
 import { prompt, promptOnce } from "../../../prompt";
 import { logger } from "../../../logger";
 import { discover, WebFrameworks } from "../../../frameworks";
+import { ALLOWED_SSR_REGIONS, DEFAULT_REGION } from "../../../frameworks/constants";
 import * as experiments from "../../../experiments";
+import { errNoDefaultSite, getDefaultHostingSite } from "../../../getDefaultHostingSite";
+import { Options } from "../../../options";
+import { last, logSuccess } from "../../../utils";
+import { interactiveCreateHostingSite } from "../../../hosting/interactive";
 
 const INDEX_TEMPLATE = fs.readFileSync(
   __dirname + "/../../../../templates/init/hosting/index.html",
@@ -20,10 +26,43 @@ const MISSING_TEMPLATE = fs.readFileSync(
 const DEFAULT_IGNORES = ["firebase.json", "**/.*", "**/node_modules/**"];
 
 /**
- *
+ * Does the setup steps for Firebase Hosting.
+ * WARNING: #6527 - `options` may not have all the things you think it does.
  */
-export async function doSetup(setup: any, config: any): Promise<void> {
+export async function doSetup(setup: any, config: any, options: Options): Promise<void> {
   setup.hosting = {};
+
+  // There's a path where we can set up Hosting without a project, so if
+  // if setup.projectId is empty, we don't do any checking for a Hosting site.
+  if (setup.projectId) {
+    let hasHostingSite = true;
+    try {
+      await getDefaultHostingSite({ projectId: setup.projectId });
+    } catch (err: unknown) {
+      if (err !== errNoDefaultSite) {
+        throw err;
+      }
+      hasHostingSite = false;
+    }
+
+    if (!hasHostingSite) {
+      const confirmCreate = await promptOnce({
+        type: "confirm",
+        message: "A Firebase Hosting site is required to deploy. Would you like to create one now?",
+        default: true,
+      });
+      if (confirmCreate) {
+        const createOptions = {
+          projectId: setup.projectId,
+          nonInteractive: options.nonInteractive,
+        };
+        const newSite = await interactiveCreateHostingSite("", "", createOptions);
+        logger.info();
+        logSuccess(`Firebase Hosting site ${last(newSite.name.split("/"))} created!`);
+        logger.info();
+      }
+    }
+  }
 
   let discoveredFramework = experiments.isEnabled("webframeworks")
     ? await discover(config.projectDir, false)
@@ -70,7 +109,7 @@ export async function doSetup(setup: any, config: any): Promise<void> {
     );
 
     if (setup.hosting.source !== ".") delete setup.hosting.useDiscoveredFramework;
-    discoveredFramework = await discover(setup.hosting.source);
+    discoveredFramework = await discover(join(config.projectDir, setup.hosting.source));
 
     if (discoveredFramework) {
       const name = WebFrameworks[discoveredFramework.framework].name;
@@ -112,13 +151,27 @@ export async function doSetup(setup: any, config: any): Promise<void> {
       );
 
       if (discoveredFramework) rimraf(setup.hosting.source);
-      await WebFrameworks[setup.hosting.whichFramework].init!(setup);
+      await WebFrameworks[setup.hosting.whichFramework].init!(setup, config);
     }
+
+    await promptOnce(
+      {
+        name: "region",
+        type: "list",
+        message: "In which region would you like to host server-side content, if applicable?",
+        default: DEFAULT_REGION,
+        choices: ALLOWED_SSR_REGIONS,
+      },
+      setup.hosting
+    );
 
     setup.config.hosting = {
       source: setup.hosting.source,
       // TODO swap out for framework ignores
       ignore: DEFAULT_IGNORES,
+      frameworksBackend: {
+        region: setup.hosting.region,
+      },
     };
   } else {
     logger.info();

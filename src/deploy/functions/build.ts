@@ -2,17 +2,19 @@ import * as backend from "./backend";
 import * as proto from "../../gcp/proto";
 import * as api from "../../.../../api";
 import * as params from "./params";
-import * as experiments from "../../experiments";
 import { FirebaseError } from "../../error";
 import { assertExhaustive, mapObject, nullsafeVisitor } from "../../functional";
 import { UserEnvsOpts, writeUserEnvs } from "../../functions/env";
 import { FirebaseConfig } from "./args";
+import { Runtime } from "./runtimes";
+import { ExprParseError } from "./cel";
 
 /* The union of a customer-controlled deployment and potentially deploy-time defined parameters */
 export interface Build {
   requiredAPIs: RequiredApi[];
   endpoints: Record<string, Endpoint>;
   params: params.Param[];
+  runtime?: Runtime;
 }
 
 /**
@@ -52,8 +54,9 @@ export interface RequiredApi {
 // expressions.
 // `Expression<Foo> == Expression<Foo>` is an Expression<boolean>
 // `Expression<boolean> ? Expression<T> : Expression<T>` is an Expression<T>
-export type Expression<T extends string | number | boolean> = string; // eslint-disable-line
+export type Expression<T extends string | number | boolean | string[]> = string; // eslint-disable-line
 export type Field<T extends string | number | boolean> = T | Expression<T> | null;
+export type ListField = Expression<string[]> | (string | Expression<string>)[] | null;
 
 // A service account must either:
 // 1. Be a project-relative email that ends with "@" (e.g. database-users@)
@@ -233,11 +236,11 @@ export type Endpoint = Triggered & {
   // The services account that this function should run as.
   // defaults to the GAE service account when a function is first created as a GCF gen 1 function.
   // Defaults to the compute service account when a function is first created as a GCF gen 2 function.
-  serviceAccount?: ServiceAccount | null;
+  serviceAccount?: Field<string> | ServiceAccount | null;
 
   // defaults to ["us-central1"], overridable in firebase-tools with
   //  process.env.FIREBASE_FUNCTIONS_DEFAULT_REGION
-  region?: string[];
+  region?: ListField;
 
   // The Cloud project associated with this endpoint.
   project: string;
@@ -284,24 +287,22 @@ export async function resolveBackend(
   nonInteractive?: boolean
 ): Promise<{ backend: backend.Backend; envs: Record<string, params.ParamValue> }> {
   let paramValues: Record<string, params.ParamValue> = {};
-  if (experiments.isEnabled("functionsparams")) {
-    paramValues = await params.resolveParams(
-      build.params,
-      firebaseConfig,
-      envWithTypes(build.params, userEnvs),
-      nonInteractive
-    );
+  paramValues = await params.resolveParams(
+    build.params,
+    firebaseConfig,
+    envWithTypes(build.params, userEnvs),
+    nonInteractive
+  );
 
-    const toWrite: Record<string, string> = {};
-    for (const paramName of Object.keys(paramValues)) {
-      const paramValue = paramValues[paramName];
-      if (Object.prototype.hasOwnProperty.call(userEnvs, paramName) || paramValue.internal) {
-        continue;
-      }
-      toWrite[paramName] = paramValue.toString();
+  const toWrite: Record<string, string> = {};
+  for (const paramName of Object.keys(paramValues)) {
+    const paramValue = paramValues[paramName];
+    if (Object.prototype.hasOwnProperty.call(userEnvs, paramName) || paramValue.internal) {
+      continue;
     }
-    writeUserEnvs(toWrite, userEnvOpt);
+    toWrite[paramName] = paramValue.toString();
   }
+  writeUserEnvs(toWrite, userEnvOpt);
 
   return { backend: toBackend(build, paramValues), envs: paramValues };
 }
@@ -317,6 +318,7 @@ function envWithTypes(
       string: true,
       boolean: true,
       number: true,
+      list: true,
     };
     for (const param of definedParams) {
       if (param.name === envName) {
@@ -325,18 +327,28 @@ function envWithTypes(
             string: true,
             boolean: false,
             number: false,
+            list: false,
           };
         } else if (param.type === "int") {
           providedType = {
             string: false,
             boolean: false,
             number: true,
+            list: false,
           };
         } else if (param.type === "boolean") {
           providedType = {
             string: false,
             boolean: true,
             number: false,
+            list: false,
+          };
+        } else if (param.type === "list") {
+          providedType = {
+            string: false,
+            boolean: false,
+            number: false,
+            list: true,
           };
         }
       }
@@ -420,9 +432,24 @@ export function toBackend(
       continue;
     }
 
-    let regions = bdEndpoint.region;
-    if (typeof regions === "undefined") {
+    let regions: string[] = [];
+    if (!bdEndpoint.region) {
       regions = [api.functionsDefaultRegion];
+    } else if (Array.isArray(bdEndpoint.region)) {
+      regions = params.resolveList(bdEndpoint.region, paramValues);
+    } else {
+      // N.B. setting region via GlobalOptions only accepts a String param.
+      // Therefore if we raise an exception by attempting to resolve a
+      // List param, we try resolving a String param instead.
+      try {
+        regions = params.resolveList(bdEndpoint.region, paramValues);
+      } catch (err: any) {
+        if (err instanceof ExprParseError) {
+          regions = [params.resolveString(bdEndpoint.region, paramValues)];
+        } else {
+          throw err;
+        }
+      }
     }
     for (const region of regions) {
       const trigger = discoverTrigger(bdEndpoint, region, r);
@@ -444,8 +471,7 @@ export function toBackend(
         bdEndpoint,
         "environmentVariables",
         "labels",
-        "secretEnvironmentVariables",
-        "serviceAccount"
+        "secretEnvironmentVariables"
       );
 
       proto.convertIfPresent(bkEndpoint, bdEndpoint, "ingressSettings", (from) => {
@@ -466,6 +492,7 @@ export function toBackend(
         return (mem as backend.MemoryOptions) || null;
       });
 
+      r.resolveStrings(bkEndpoint, bdEndpoint, "serviceAccount");
       r.resolveInts(
         bkEndpoint,
         bdEndpoint,
@@ -481,10 +508,12 @@ export function toBackend(
         nullsafeVisitor((cpu) => (cpu === "gcf_gen1" ? cpu : r.resolveInt(cpu)))
       );
       if (bdEndpoint.vpc) {
+        bdEndpoint.vpc.connector = params.resolveString(bdEndpoint.vpc.connector, paramValues);
         if (bdEndpoint.vpc.connector && !bdEndpoint.vpc.connector.includes("/")) {
           bdEndpoint.vpc.connector = `projects/${bdEndpoint.project}/locations/${region}/connectors/${bdEndpoint.vpc.connector}`;
         }
-        bkEndpoint.vpc = { connector: params.resolveString(bdEndpoint.vpc.connector, paramValues) };
+
+        bkEndpoint.vpc = { connector: bdEndpoint.vpc.connector };
         proto.copyIfPresent(bkEndpoint.vpc, bdEndpoint.vpc, "egressSettings");
       } else if (bdEndpoint.vpc === null) {
         bkEndpoint.vpc = null;
