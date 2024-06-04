@@ -21,7 +21,7 @@ const BINDING = {
 const SPEC = {
   region: "us-west1",
   project: projectNumber,
-  runtime: "nodejs14",
+  runtime: "nodejs14" as const,
 };
 
 describe("checkIam", () => {
@@ -75,52 +75,6 @@ describe("checkIam", () => {
     });
   });
 
-  describe("mergeBindings", () => {
-    it("should not update the policy when the bindings are present", () => {
-      const policy = {
-        etag: "etag",
-        version: 3,
-        bindings: [BINDING],
-      };
-
-      const updated = checkIam.mergeBindings(policy, [BINDING]);
-
-      expect(updated).to.be.false;
-      expect(policy.bindings).to.deep.equal([BINDING]);
-    });
-
-    it("should update the members of a binding in the policy", () => {
-      const policy = {
-        etag: "etag",
-        version: 3,
-        bindings: [BINDING],
-      };
-
-      const updated = checkIam.mergeBindings(policy, [{ role: "some/role", members: ["newuser"] }]);
-
-      expect(updated).to.be.true;
-      expect(policy.bindings).to.deep.equal([
-        {
-          role: "some/role",
-          members: ["someuser", "newuser"],
-        },
-      ]);
-    });
-
-    it("should add a new binding to the policy", () => {
-      const policy = {
-        etag: "etag",
-        version: 3,
-        bindings: [],
-      };
-
-      const updated = checkIam.mergeBindings(policy, [BINDING]);
-
-      expect(updated).to.be.true;
-      expect(policy.bindings).to.deep.equal([BINDING]);
-    });
-  });
-
   describe("ensureServiceAgentRoles", () => {
     it("should return early if we do not have new services", async () => {
       const v1EventFn: backend.Endpoint = {
@@ -157,7 +111,7 @@ describe("checkIam", () => {
         projectId,
         projectNumber,
         backend.of(wantFn),
-        backend.of(v1EventFn, v2CallableFn, wantFn)
+        backend.of(v1EventFn, v2CallableFn, wantFn),
       );
 
       expect(storageStub).to.not.have.been.called;
@@ -185,8 +139,8 @@ describe("checkIam", () => {
           projectId,
           projectNumber,
           backend.of(wantFn),
-          backend.empty()
-        )
+          backend.empty(),
+        ),
       ).to.not.be.rejected;
       expect(storageStub).to.have.been.calledOnce;
       expect(getIamStub).to.have.been.calledOnce;
@@ -218,12 +172,12 @@ describe("checkIam", () => {
           projectId,
           projectNumber,
           backend.of(wantFn),
-          backend.empty()
-        )
+          backend.empty(),
+        ),
       ).to.be.rejectedWith(
         "We failed to modify the IAM policy for the project. The functions " +
           "deployment requires specific roles to be granted to service agents," +
-          " otherwise the deployment will fail."
+          " otherwise the deployment will fail.",
       );
       expect(storageStub).to.have.been.calledOnce;
       expect(getIamStub).to.have.been.calledOnce;
@@ -280,7 +234,7 @@ describe("checkIam", () => {
         projectId,
         projectNumber,
         backend.of(wantFn),
-        backend.empty()
+        backend.empty(),
       );
 
       expect(storageStub).to.have.been.calledOnce;
@@ -336,7 +290,7 @@ describe("checkIam", () => {
       projectId,
       projectNumber,
       backend.of(wantFn),
-      backend.of(haveFn)
+      backend.of(haveFn),
     );
 
     expect(storageStub).to.have.been.calledOnce;
@@ -389,7 +343,7 @@ describe("checkIam", () => {
       projectId,
       projectNumber,
       backend.of(wantFn),
-      backend.empty()
+      backend.empty(),
     );
 
     expect(getIamStub).to.have.been.calledOnce;
@@ -425,7 +379,7 @@ describe("checkIam", () => {
       projectId,
       projectNumber,
       backend.of(wantFn),
-      backend.of(haveFn)
+      backend.of(haveFn),
     );
 
     expect(getIamStub).to.not.have.been.called;
@@ -476,7 +430,7 @@ describe("checkIam", () => {
       projectId,
       projectNumber,
       backend.of(wantFn),
-      backend.empty()
+      backend.empty(),
     );
 
     expect(getIamStub).to.have.been.calledOnce;
@@ -512,7 +466,7 @@ describe("checkIam", () => {
       projectId,
       projectNumber,
       backend.of(wantFn),
-      backend.of(haveFn)
+      backend.of(haveFn),
     );
 
     expect(getIamStub).to.not.have.been.called;
@@ -563,7 +517,7 @@ describe("checkIam", () => {
       projectId,
       projectNumber,
       backend.of(wantFn),
-      backend.empty()
+      backend.empty(),
     );
 
     expect(getIamStub).to.have.been.calledOnce;
@@ -599,7 +553,7 @@ describe("checkIam", () => {
       projectId,
       projectNumber,
       backend.of(wantFn),
-      backend.of(haveFn)
+      backend.of(haveFn),
     );
 
     expect(getIamStub).to.not.have.been.called;

@@ -9,11 +9,10 @@ import * as utils from "./utils";
 import * as scopes from "./scopes";
 import { Tokens, User } from "./types/auth";
 import { setRefreshToken, setActiveAccount } from "./auth";
-import { selectProjectInMonospace, isMonospaceEnv } from "./monospace";
 import type { Options } from "./options";
 
 const AUTH_ERROR_MESSAGE = `Command requires authentication, please run ${clc.bold(
-  "firebase login"
+  "firebase login",
 )}`;
 
 let authClient: GoogleAuth | undefined;
@@ -38,8 +37,10 @@ function getAuthClient(config: GoogleAuthOptions): GoogleAuth {
  * @param authScopes scopes to be obtained.
  */
 async function autoAuth(options: Options, authScopes: string[]): Promise<void | string> {
+  if (process.env.MONOSPACE_ENV) {
+    throw new FirebaseError("autoAuth not yet implemented for IDX. Please run 'firebase login'");
+  }
   const client = getAuthClient({ scopes: authScopes, projectId: options.project });
-
   const token = await client.getAccessToken();
   token !== null ? apiv2.setAccessToken(token) : false;
 
@@ -50,14 +51,6 @@ async function autoAuth(options: Options, authScopes: string[]): Promise<void | 
   } catch (e) {
     // Make sure any error here doesn't block the CLI, but log it.
     logger.debug(`Error getting account credentials.`);
-  }
-
-  if (!options.isVSCE && isMonospaceEnv()) {
-    await selectProjectInMonospace({
-      projectRoot: options.config.projectDir,
-      project: options.project,
-      isVSCE: options.isVSCE,
-    });
   }
 
   return clientEmail;
@@ -79,13 +72,13 @@ export async function requireAuth(options: any): Promise<string | void> {
     logger.debug("> authorizing via --token option");
     utils.logWarning(
       "Authenticating with `--token` is deprecated and will be removed in a future major version of `firebase-tools`. " +
-        "Instead, use a service account key with `GOOGLE_APPLICATION_CREDENTIALS`: https://cloud.google.com/docs/authentication/getting-started"
+        "Instead, use a service account key with `GOOGLE_APPLICATION_CREDENTIALS`: https://cloud.google.com/docs/authentication/getting-started",
     );
   } else if (process.env.FIREBASE_TOKEN) {
     logger.debug("> authorizing via FIREBASE_TOKEN environment variable");
     utils.logWarning(
       "Authenticating with `FIREBASE_TOKEN` is deprecated and will be removed in a future major version of `firebase-tools`. " +
-        "Instead, use a service account key with `GOOGLE_APPLICATION_CREDENTIALS`: https://cloud.google.com/docs/authentication/getting-started"
+        "Instead, use a service account key with `GOOGLE_APPLICATION_CREDENTIALS`: https://cloud.google.com/docs/authentication/getting-started",
     );
   } else if (user) {
     logger.debug(`> authorizing via signed-in user (${user.email})`);
@@ -95,7 +88,7 @@ export async function requireAuth(options: any): Promise<string | void> {
     } catch (e: any) {
       throw new FirebaseError(
         `Failed to authenticate, have you run ${clc.bold("firebase login")}?`,
-        { original: e }
+        { original: e },
       );
     }
   }
@@ -112,4 +105,5 @@ export async function requireAuth(options: any): Promise<string | void> {
   }
 
   setActiveAccount(options, { user, tokens });
+  return user.email;
 }

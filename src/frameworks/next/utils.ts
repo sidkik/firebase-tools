@@ -1,8 +1,9 @@
 import { existsSync } from "fs";
 import { pathExists } from "fs-extra";
-import { basename, extname, join, posix } from "path";
+import { basename, extname, join, posix, sep } from "path";
 import { readFile } from "fs/promises";
 import { sync as globSync } from "glob";
+import * as glob from "glob";
 import type { PagesManifest } from "next/dist/build/webpack/plugins/pages-manifest-plugin";
 import { coerce } from "semver";
 
@@ -19,16 +20,21 @@ import type {
   MiddlewareManifestV1,
   MiddlewareManifestV2,
   AppPathsManifest,
-  AppPathRoutesManifest,
   HostingHeadersWithSource,
+  AppPathRoutesManifest,
+  ActionManifest,
+  NextConfigFileName,
 } from "./interfaces";
 import {
   APP_PATH_ROUTES_MANIFEST,
   EXPORT_MARKER,
   IMAGES_MANIFEST,
   MIDDLEWARE_MANIFEST,
+  WEBPACK_LAYERS,
+  CONFIG_FILES,
 } from "./constants";
 import { dirExistsSync, fileExistsSync } from "../../fsutils";
+import { IS_WINDOWS } from "../../utils";
 
 export const I18N_SOURCE = /\/:nextInternalLocale(\([^\)]+\))?/;
 
@@ -139,7 +145,7 @@ export function isHeaderSupportedByHosting(header: RoutesManifestHeader): boolea
  * See: https://nextjs.org/docs/api-reference/next.config.js/rewrites
  */
 export function getNextjsRewritesToUse(
-  nextJsRewrites: RoutesManifest["rewrites"]
+  nextJsRewrites: RoutesManifest["rewrites"],
 ): RoutesManifestRewrite[] {
   if (Array.isArray(nextJsRewrites)) {
     return nextJsRewrites.map(cleanI18n);
@@ -202,7 +208,7 @@ export async function isUsingMiddleware(dir: string, isDevMode: boolean): Promis
     return middlewareJs || middlewareTs;
   } else {
     const middlewareManifest: MiddlewareManifest = await readJSON<MiddlewareManifest>(
-      join(dir, "server", MIDDLEWARE_MANIFEST)
+      join(dir, "server", MIDDLEWARE_MANIFEST),
     );
 
     return Object.keys(middlewareManifest.middleware).length > 0;
@@ -217,7 +223,7 @@ export async function isUsingMiddleware(dir: string, isDevMode: boolean): Promis
  */
 export async function isUsingImageOptimization(
   projectDir: string,
-  distDir: string
+  distDir: string,
 ): Promise<boolean> {
   let isNextImageImported = await usesNextImage(projectDir, distDir);
 
@@ -230,7 +236,7 @@ export async function isUsingImageOptimization(
 
   if (isNextImageImported) {
     const imagesManifest = await readJSON<ImagesManifest>(
-      join(projectDir, distDir, IMAGES_MANIFEST)
+      join(projectDir, distDir, IMAGES_MANIFEST),
     );
     return !imagesManifest.images.unoptimized;
   }
@@ -243,17 +249,23 @@ export async function isUsingImageOptimization(
  */
 export async function isUsingNextImageInAppDirectory(
   projectDir: string,
-  nextDir: string
+  nextDir: string,
 ): Promise<boolean> {
+  const nextImagePath = ["node_modules", "next", "dist", "client", "image"];
+  const nextImageString = IS_WINDOWS
+    ? // Note: Windows requires double backslashes to match Next.js generated file
+      nextImagePath.join(sep + sep)
+    : join(...nextImagePath);
+
   const files = globSync(
-    join(projectDir, nextDir, "server", "**", "*client-reference-manifest.js")
+    join(projectDir, nextDir, "server", "**", "*client-reference-manifest.js"),
   );
 
   for (const filepath of files) {
-    const fileContents = await readFile(filepath);
+    const fileContents = await readFile(filepath, "utf-8");
 
     // Return true when the first file containing the next/image component is found
-    if (fileContents.includes("node_modules/next/dist/client/image")) {
+    if (fileContents.includes(nextImageString)) {
       return true;
     }
   }
@@ -281,7 +293,7 @@ export function allDependencyNames(mod: NpmLsDepdendency): string[] {
   if (!mod.dependencies) return [];
   const dependencyNames = Object.keys(mod.dependencies).reduce(
     (acc, it) => [...acc, it, ...allDependencyNames(mod.dependencies![it])],
-    [] as string[]
+    [] as string[],
   );
   return dependencyNames;
 }
@@ -296,7 +308,7 @@ export function getMiddlewareMatcherRegexes(middlewareManifest: MiddlewareManife
 
   if (middlewareManifest.version === 1) {
     middlewareMatchers = middlewareObjectValues.map(
-      (page: MiddlewareManifestV1["middleware"]["page"]) => ({ regexp: page.regexp })
+      (page: MiddlewareManifestV1["middleware"]["page"]) => ({ regexp: page.regexp }),
     );
   } else {
     middlewareMatchers = middlewareObjectValues
@@ -313,7 +325,7 @@ export function getMiddlewareMatcherRegexes(middlewareManifest: MiddlewareManife
 export function getNonStaticRoutes(
   pagesManifestJSON: PagesManifest,
   prerenderedRoutes: string[],
-  dynamicRoutes: string[]
+  dynamicRoutes: string[],
 ): string[] {
   const nonStaticRoutes = Object.entries(pagesManifestJSON)
     .filter(
@@ -323,7 +335,7 @@ export function getNonStaticRoutes(
           ["/_app", "/_error", "/_document"].includes(it) ||
           prerenderedRoutes.includes(it) ||
           dynamicRoutes.includes(it)
-        )
+        ),
     )
     .map(([it]) => it);
 
@@ -337,8 +349,8 @@ export function getNonStaticServerComponents(
   appPathsManifest: AppPathsManifest,
   appPathRoutesManifest: AppPathRoutesManifest,
   prerenderedRoutes: string[],
-  dynamicRoutes: string[]
-): string[] {
+  dynamicRoutes: string[],
+): Set<string> {
   const nonStaticServerComponents = Object.entries(appPathsManifest)
     .filter(([it, src]) => {
       if (extname(src) !== ".js") return;
@@ -347,7 +359,7 @@ export function getNonStaticServerComponents(
     })
     .map(([it]) => it);
 
-  return nonStaticServerComponents;
+  return new Set(nonStaticServerComponents);
 }
 
 /**
@@ -357,13 +369,13 @@ export async function getHeadersFromMetaFiles(
   sourceDir: string,
   distDir: string,
   basePath: string,
-  appPathRoutesManifest: AppPathRoutesManifest
+  appPathRoutesManifest: AppPathRoutesManifest,
 ): Promise<HostingHeadersWithSource[]> {
   const headers: HostingHeadersWithSource[] = [];
 
   await Promise.all(
     Object.entries(appPathRoutesManifest).map(async ([key, source]) => {
-      if (basename(key) !== "route") return;
+      if (!["route", "page"].includes(basename(key))) return;
       const parts = source.split("/").filter((it) => !!it);
       const partsOrIndex = parts.length > 0 ? parts : ["index"];
 
@@ -378,7 +390,7 @@ export async function getHeadersFromMetaFiles(
             headers: Object.entries(meta.headers).map(([key, value]) => ({ key, value })),
           });
       }
-    })
+    }),
   );
 
   return headers;
@@ -406,4 +418,86 @@ export function getNextVersion(cwd: string): string | undefined {
   if (!nextVersionSemver) return dependency.version;
 
   return nextVersionSemver.toString();
+}
+
+/**
+ * Whether the Next.js project has a static `not-found` page in the app directory.
+ *
+ * The Next.js build manifests are misleading regarding the existence of a static
+ * `not-found` component. Therefore, we check if a `_not-found.html` file exists
+ * in the generated app directory files to know whether `not-found` is static.
+ */
+export async function hasStaticAppNotFoundComponent(
+  sourceDir: string,
+  distDir: string,
+): Promise<boolean> {
+  return pathExists(join(sourceDir, distDir, "server", "app", "_not-found.html"));
+}
+
+/**
+ * Find routes using server actions by checking the server-reference-manifest.json
+ */
+export function getRoutesWithServerAction(
+  serverReferenceManifest: ActionManifest,
+  appPathRoutesManifest: AppPathRoutesManifest,
+): string[] {
+  const routesWithServerAction = new Set<string>();
+
+  for (const key of Object.keys(serverReferenceManifest)) {
+    if (key !== "edge" && key !== "node") continue;
+
+    const edgeOrNode = serverReferenceManifest[key];
+
+    for (const actionId of Object.keys(edgeOrNode)) {
+      if (!edgeOrNode[actionId].layer) continue;
+
+      for (const [route, type] of Object.entries(edgeOrNode[actionId].layer)) {
+        if (type === WEBPACK_LAYERS.actionBrowser) {
+          routesWithServerAction.add(appPathRoutesManifest[route.replace("app", "")]);
+        }
+      }
+    }
+  }
+
+  return Array.from(routesWithServerAction);
+}
+
+/**
+ * Get files in the dist directory to be deployed to Firebase, ignoring development files.
+ *
+ * Return relative paths to the dist directory.
+ */
+export async function getProductionDistDirFiles(
+  sourceDir: string,
+  distDir: string,
+): Promise<string[]> {
+  const productionDistDirFiles = await new Promise<string[]>((resolve, reject) =>
+    glob(
+      "**",
+      {
+        ignore: [join("cache", "webpack", "*-development", "**"), join("cache", "eslint", "**")],
+        cwd: join(sourceDir, distDir),
+        nodir: true,
+        absolute: false,
+      },
+      (err, matches) => {
+        if (err) reject(err);
+        resolve(matches);
+      },
+    ),
+  );
+
+  return productionDistDirFiles;
+}
+
+/**
+ * Get the Next.js config file name in the project directory, either
+ * `next.config.js` or `next.config.mjs`.  If none of them exist, return null.
+ */
+export async function whichNextConfigFile(dir: string): Promise<NextConfigFileName | null> {
+  for (const file of CONFIG_FILES) {
+    if (await pathExists(join(dir, file))) return file;
+  }
+
+  return null;
 }

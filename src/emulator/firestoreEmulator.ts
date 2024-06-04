@@ -131,7 +131,7 @@ export class FirestoreEmulator implements EmulatorInstance {
 
     const res = await EmulatorRegistry.client(Emulators.FIRESTORE).put<any, { issues?: Issue[] }>(
       `/emulator/v1/projects/${projectId}:securityRules`,
-      body
+      body,
     );
     if (res.body && Array.isArray(res.body.issues)) {
       return res.body.issues;
@@ -148,7 +148,7 @@ export class FirestoreEmulator implements EmulatorInstance {
     const line = issue.sourcePosition.line || 0;
     const col = issue.sourcePosition.column || 0;
     return `${clc.cyan(relativePath)}:${clc.yellow(line)}:${clc.yellow(col)} - ${clc.red(
-      issue.severity
+      issue.severity,
     )} ${issue.description}`;
   }
 }

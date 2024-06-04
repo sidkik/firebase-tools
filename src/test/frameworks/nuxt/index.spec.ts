@@ -44,7 +44,7 @@ describe("Nuxt 2 utils", () => {
 
       expect(await discoverNuxt2(discoverNuxtDir)).to.deep.equal({
         mayWantBackend: true,
-        publicDirectory: "static",
+        version: "2.15.8",
       });
     });
 
@@ -74,7 +74,7 @@ describe("Nuxt 2 utils", () => {
 
       expect(await discoverNuxt3(discoverNuxtDir)).to.deep.equal({
         mayWantBackend: true,
-        publicDirectory: "public",
+        version: "3.0.0",
       });
     });
   });
@@ -113,7 +113,7 @@ describe("Nuxt 2 utils", () => {
         > Local:    http://localhost:3000/
         > Network:  http://0.0.0.0:3000/
         > Network:  http://[some:ipv6::::::]:3000/
-        > Network:  http://[some:other:ipv6:::::]:3000/`
+        > Network:  http://[some:other:ipv6:::::]:3000/`,
       );
 
       await expect(devModeHandle).eventually.be.fulfilled;

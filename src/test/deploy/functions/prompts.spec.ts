@@ -68,8 +68,8 @@ describe("promptForFailurePolicies", () => {
       functionPrompts.promptForFailurePolicies(
         SAMPLE_OPTIONS,
         backend.of(endpoint),
-        backend.empty()
-      )
+        backend.empty(),
+      ),
     ).not.to.be.rejected;
     expect(promptStub).to.have.been.calledOnce;
   });
@@ -87,8 +87,8 @@ describe("promptForFailurePolicies", () => {
       functionPrompts.promptForFailurePolicies(
         SAMPLE_OPTIONS,
         backend.of(endpoint),
-        backend.of(endpoint)
-      )
+        backend.of(endpoint),
+      ),
     ).eventually.be.fulfilled;
     expect(promptStub).to.not.have.been.called;
   });
@@ -107,8 +107,8 @@ describe("promptForFailurePolicies", () => {
       functionPrompts.promptForFailurePolicies(
         SAMPLE_OPTIONS,
         backend.of(endpoint),
-        backend.empty()
-      )
+        backend.empty(),
+      ),
     ).to.eventually.be.rejectedWith(FirebaseError, /Deployment canceled/);
     expect(promptStub).to.have.been.calledOnce;
   });
@@ -133,8 +133,8 @@ describe("promptForFailurePolicies", () => {
       functionPrompts.promptForFailurePolicies(
         SAMPLE_OPTIONS,
         backend.of(newEndpoint),
-        backend.of(endpoint)
-      )
+        backend.of(endpoint),
+      ),
     ).eventually.be.fulfilled;
     expect(promptStub).to.have.been.calledOnce;
   });
@@ -153,8 +153,8 @@ describe("promptForFailurePolicies", () => {
       functionPrompts.promptForFailurePolicies(
         SAMPLE_OPTIONS,
         backend.of(endpoint),
-        backend.empty()
-      )
+        backend.empty(),
+      ),
     ).to.eventually.be.rejectedWith(FirebaseError, /Deployment canceled/);
     expect(promptStub).to.have.been.calledOnce;
   });
@@ -172,8 +172,8 @@ describe("promptForFailurePolicies", () => {
       functionPrompts.promptForFailurePolicies(
         SAMPLE_OPTIONS,
         backend.of(endpoint),
-        backend.empty()
-      )
+        backend.empty(),
+      ),
     ).to.eventually.be.fulfilled;
     expect(promptStub).not.to.have.been.called;
   });
@@ -189,7 +189,7 @@ describe("promptForFailurePolicies", () => {
     const options = { ...SAMPLE_OPTIONS, nonInteractive: true };
 
     await expect(
-      functionPrompts.promptForFailurePolicies(options, backend.of(endpoint), backend.empty())
+      functionPrompts.promptForFailurePolicies(options, backend.of(endpoint), backend.empty()),
     ).to.be.rejectedWith(FirebaseError, /--force option/);
     expect(promptStub).not.to.have.been.called;
   });
@@ -205,7 +205,7 @@ describe("promptForFailurePolicies", () => {
     const options = { ...SAMPLE_OPTIONS, nonInteractive: true, force: true };
 
     await expect(
-      functionPrompts.promptForFailurePolicies(options, backend.of(endpoint), backend.empty())
+      functionPrompts.promptForFailurePolicies(options, backend.of(endpoint), backend.empty()),
     ).to.eventually.be.fulfilled;
     expect(promptStub).not.to.have.been.called;
   });
@@ -233,7 +233,7 @@ describe("promptForMinInstances", () => {
     promptStub.resolves(true);
 
     await expect(
-      functionPrompts.promptForMinInstances(SAMPLE_OPTIONS, backend.of(endpoint), backend.empty())
+      functionPrompts.promptForMinInstances(SAMPLE_OPTIONS, backend.of(endpoint), backend.empty()),
     ).not.to.be.rejected;
     expect(promptStub).to.have.been.calledOnce;
   });
@@ -270,8 +270,8 @@ describe("promptForMinInstances", () => {
       functionPrompts.promptForMinInstances(
         SAMPLE_OPTIONS,
         backend.of(newEndpoint),
-        backend.of(endpoint)
-      )
+        backend.of(endpoint),
+      ),
     ).eventually.be.fulfilled;
     expect(promptStub).to.not.have.been.called;
   });
@@ -283,7 +283,7 @@ describe("promptForMinInstances", () => {
     });
     promptStub.resolves(false);
     await expect(
-      functionPrompts.promptForMinInstances(SAMPLE_OPTIONS, bkend, backend.empty())
+      functionPrompts.promptForMinInstances(SAMPLE_OPTIONS, bkend, backend.empty()),
     ).to.eventually.be.rejectedWith(FirebaseError, /Deployment canceled/);
     expect(promptStub).to.have.been.calledOnce;
   });
@@ -299,8 +299,8 @@ describe("promptForMinInstances", () => {
       functionPrompts.promptForMinInstances(
         SAMPLE_OPTIONS,
         backend.of(newEndpoint),
-        backend.of(SAMPLE_ENDPOINT)
-      )
+        backend.of(SAMPLE_ENDPOINT),
+      ),
     ).eventually.be.fulfilled;
     expect(promptStub).to.have.been.calledOnce;
   });
@@ -320,8 +320,8 @@ describe("promptForMinInstances", () => {
       functionPrompts.promptForMinInstances(
         SAMPLE_OPTIONS,
         backend.of(newEndpoint),
-        backend.of(endpoint)
-      )
+        backend.of(endpoint),
+      ),
     ).eventually.be.fulfilled;
     expect(promptStub).to.have.been.calledOnce;
   });
@@ -343,8 +343,8 @@ describe("promptForMinInstances", () => {
       functionPrompts.promptForMinInstances(
         SAMPLE_OPTIONS,
         backend.of(newEndpoint),
-        backend.of(endpoint)
-      )
+        backend.of(endpoint),
+      ),
     ).eventually.be.fulfilled;
     expect(promptStub).to.have.been.calledOnce;
   });
@@ -357,7 +357,7 @@ describe("promptForMinInstances", () => {
     promptStub.resolves(false);
 
     await expect(
-      functionPrompts.promptForMinInstances(SAMPLE_OPTIONS, backend.of(endpoint), backend.empty())
+      functionPrompts.promptForMinInstances(SAMPLE_OPTIONS, backend.of(endpoint), backend.empty()),
     ).to.eventually.be.rejectedWith(FirebaseError, /Deployment canceled/);
     expect(promptStub).to.have.been.calledOnce;
   });
@@ -369,8 +369,8 @@ describe("promptForMinInstances", () => {
       functionPrompts.promptForMinInstances(
         SAMPLE_OPTIONS,
         backend.of(SAMPLE_ENDPOINT),
-        backend.empty()
-      )
+        backend.empty(),
+      ),
     ).to.eventually.be.fulfilled;
     expect(promptStub).not.to.have.been.called;
   });
@@ -383,7 +383,7 @@ describe("promptForMinInstances", () => {
     const options = { ...SAMPLE_OPTIONS, nonInteractive: true };
 
     await expect(
-      functionPrompts.promptForMinInstances(options, backend.of(endpoint), backend.empty())
+      functionPrompts.promptForMinInstances(options, backend.of(endpoint), backend.empty()),
     ).to.be.rejectedWith(FirebaseError, /--force option/);
     expect(promptStub).not.to.have.been.called;
   });
@@ -396,7 +396,7 @@ describe("promptForMinInstances", () => {
     const options = { ...SAMPLE_OPTIONS, nonInteractive: true, force: true };
 
     await expect(
-      functionPrompts.promptForMinInstances(options, backend.of(endpoint), backend.empty())
+      functionPrompts.promptForMinInstances(options, backend.of(endpoint), backend.empty()),
     ).to.eventually.be.fulfilled;
     expect(promptStub).not.to.have.been.called;
   });
@@ -410,9 +410,123 @@ describe("promptForMinInstances", () => {
     promptStub.resolves(true);
 
     await expect(
-      functionPrompts.promptForMinInstances(SAMPLE_OPTIONS, backend.of(endpoint), backend.empty())
+      functionPrompts.promptForMinInstances(SAMPLE_OPTIONS, backend.of(endpoint), backend.empty()),
     ).to.eventually.be.fulfilled;
     expect(promptStub).to.have.been.called;
     expect(logStub.firstCall.args[1]).to.match(/Cannot calculate the minimum monthly bill/);
+  });
+});
+
+describe("promptForUnsafeMigration", () => {
+  let promptStub: sinon.SinonStub;
+
+  beforeEach(() => {
+    promptStub = sinon.stub(prompt, "promptOnce");
+  });
+
+  afterEach(() => {
+    promptStub.restore();
+  });
+
+  const firestoreEventTrigger: backend.EventTrigger = {
+    eventType: "google.cloud.firestore.document.v1.written",
+    eventFilters: { namespace: "(default)", document: "messages/{id}" },
+    retry: false,
+  };
+  const v2Endpoint0: backend.Endpoint = {
+    platform: "gcfv2",
+    id: "0",
+    region: "us-central1",
+    project: "a",
+    entryPoint: "function",
+    labels: {},
+    environmentVariables: {},
+    runtime: "nodejs18",
+    eventTrigger: firestoreEventTrigger,
+  };
+  const v2Endpoint1: backend.Endpoint = {
+    platform: "gcfv2",
+    id: "1",
+    region: "us-central1",
+    project: "a",
+    entryPoint: "function",
+    labels: {},
+    environmentVariables: {},
+    runtime: "nodejs18",
+    eventTrigger: firestoreEventTrigger,
+  };
+
+  it("should prompt if there are potentially unsafe function updates", async () => {
+    promptStub.resolves(false);
+    const epUpdates = [
+      {
+        endpoint: v2Endpoint0,
+      },
+      {
+        endpoint: v2Endpoint1,
+        unsafe: true,
+      },
+    ];
+
+    await functionPrompts.promptForUnsafeMigration(epUpdates, SAMPLE_OPTIONS);
+
+    expect(promptStub).to.have.been.calledOnce;
+  });
+
+  it("should only keep function updates that have been confirmed by user", async () => {
+    promptStub.onFirstCall().resolves(true);
+    promptStub.onSecondCall().resolves(false);
+    const epUpdates = [
+      {
+        endpoint: v2Endpoint0,
+        unsafe: true,
+      },
+      {
+        endpoint: v2Endpoint1,
+        unsafe: true,
+      },
+    ];
+
+    await expect(
+      functionPrompts.promptForUnsafeMigration(epUpdates, SAMPLE_OPTIONS),
+    ).to.eventually.deep.equal([{ endpoint: v2Endpoint0, unsafe: true }]);
+  });
+
+  it("should force unsafe function updates when flag is set", async () => {
+    const epUpdates = [
+      {
+        endpoint: v2Endpoint0,
+        unsafe: true,
+      },
+      {
+        endpoint: v2Endpoint1,
+        unsafe: true,
+      },
+    ];
+    const options = { ...SAMPLE_OPTIONS, force: true };
+
+    await expect(functionPrompts.promptForUnsafeMigration(epUpdates, options)).to.eventually.equal(
+      epUpdates,
+    );
+    expect(promptStub).to.have.not.been.called;
+  });
+
+  it("should not proceed with unsafe function updates in non-interactive mode", async () => {
+    const epUpdates = [
+      {
+        endpoint: v2Endpoint0,
+        unsafe: true,
+      },
+      {
+        endpoint: v2Endpoint1,
+        unsafe: false,
+      },
+    ];
+    const options = { ...SAMPLE_OPTIONS, nonInteractive: true };
+
+    await expect(
+      functionPrompts.promptForUnsafeMigration(epUpdates, options),
+    ).to.eventually.deep.equal([{ endpoint: v2Endpoint1, unsafe: false }]);
+    expect(promptStub).to.have.not.been.called;
   });
 });
