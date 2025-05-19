@@ -7,39 +7,69 @@ import { logger } from "../logger";
 import { requirePermissions } from "../requirePermissions";
 import { Emulators } from "../emulator/types";
 import { warnEmulatorNotSupported } from "../emulator/commandUtils";
-import { FirestoreOptions } from "../firestore/options";
+import { EncryptionType, FirestoreOptions } from "../firestore/options";
 import { PrettyPrint } from "../firestore/pretty-print";
+import { FirebaseError } from "../error";
 
 export const command = new Command("firestore:databases:restore")
-  .description("Restore a Firestore database in your Firebase project.")
+  .description("restore a Firestore database from a backup")
   .option("-d, --database <databaseID>", "ID of the database to restore into")
-  .option("-b, --backup <backup>", "Backup from which to restore")
+  .option("-b, --backup <backup>", "backup from which to restore")
+  .option(
+    "-e, --encryption-type <encryptionType>",
+    `encryption method of the restored database; one of ${EncryptionType.USE_SOURCE_ENCRYPTION} (default), ` +
+      `${EncryptionType.CUSTOMER_MANAGED_ENCRYPTION}, ${EncryptionType.GOOGLE_DEFAULT_ENCRYPTION}`,
+  )
+  // TODO(b/356137854): Remove allowlist only message once feature is public GA.
+  .option(
+    "-k, --kms-key-name <kmsKeyName>",
+    "resource ID of the Cloud KMS key to encrypt the restored database. This " +
+      "feature is allowlist only in initial launch",
+  )
   .before(requirePermissions, ["datastore.backups.restoreDatabase"])
   .before(warnEmulatorNotSupported, Emulators.FIRESTORE)
   .action(async (options: FirestoreOptions) => {
     const api = new fsi.FirestoreApi();
     const printer = new PrettyPrint();
+    const helpCommandText = "See firebase firestore:databases:restore --help for more info.";
 
     if (!options.database) {
-      logger.error(
-        "Missing required flag --database. See firebase firestore:databases:restore --help for more info",
-      );
-      return;
+      throw new FirebaseError(`Missing required flag --database. ${helpCommandText}`);
     }
     const databaseId = options.database;
 
     if (!options.backup) {
-      logger.error(
-        "Missing required flag --backup. See firebase firestore:databases:restore --help for more info",
-      );
-      return;
+      throw new FirebaseError(`Missing required flag --backup. ${helpCommandText}`);
     }
     const backupName = options.backup;
+
+    let encryptionConfig: types.EncryptionConfig | undefined = undefined;
+    switch (options.encryptionType) {
+      case EncryptionType.GOOGLE_DEFAULT_ENCRYPTION:
+        throwIfKmsKeyNameIsSet(options.kmsKeyName);
+        encryptionConfig = { googleDefaultEncryption: {} };
+        break;
+      case EncryptionType.USE_SOURCE_ENCRYPTION:
+        throwIfKmsKeyNameIsSet(options.kmsKeyName);
+        encryptionConfig = { useSourceEncryption: {} };
+        break;
+      case EncryptionType.CUSTOMER_MANAGED_ENCRYPTION:
+        encryptionConfig = {
+          customerManagedEncryption: { kmsKeyName: getKmsKeyOrThrow(options.kmsKeyName) },
+        };
+        break;
+      case undefined:
+        throwIfKmsKeyNameIsSet(options.kmsKeyName);
+        break;
+      default:
+        throw new FirebaseError(`Invalid value for flag --encryption-type. ${helpCommandText}`);
+    }
 
     const databaseResp: types.DatabaseResp = await api.restoreDatabase(
       options.project,
       databaseId,
       backupName,
+      encryptionConfig,
     );
 
     if (options.json) {
@@ -59,4 +89,22 @@ export const command = new Command("firestore:databases:restore")
     }
 
     return databaseResp;
+
+    function throwIfKmsKeyNameIsSet(kmsKeyName: string | undefined): void {
+      if (kmsKeyName) {
+        throw new FirebaseError(
+          "--kms-key-name can only be set when specifying an --encryption-type " +
+            `of ${EncryptionType.CUSTOMER_MANAGED_ENCRYPTION}.`,
+        );
+      }
+    }
+
+    function getKmsKeyOrThrow(kmsKeyName: string | undefined): string {
+      if (kmsKeyName) return kmsKeyName;
+
+      throw new FirebaseError(
+        "--kms-key-name must be provided when specifying an --encryption-type " +
+          `of ${EncryptionType.CUSTOMER_MANAGED_ENCRYPTION}.`,
+      );
+    }
   });

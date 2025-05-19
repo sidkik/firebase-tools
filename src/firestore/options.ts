@@ -27,4 +27,14 @@ export interface FirestoreOptions extends Options {
 
   // backups
   backup?: string;
+
+  // CMEK
+  encryptionType?: EncryptionType;
+  kmsKeyName?: string;
+}
+
+export enum EncryptionType {
+  CUSTOMER_MANAGED_ENCRYPTION = "CUSTOMER_MANAGED_ENCRYPTION",
+  USE_SOURCE_ENCRYPTION = "USE_SOURCE_ENCRYPTION",
+  GOOGLE_DEFAULT_ENCRYPTION = "GOOGLE_DEFAULT_ENCRYPTION",
 }

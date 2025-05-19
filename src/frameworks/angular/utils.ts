@@ -1,3 +1,4 @@
+import type { JsonObject } from "@angular-devkit/core";
 import type { Target } from "@angular-devkit/architect";
 import type { ProjectDefinition } from "@angular-devkit/core/src/workspace";
 import type { WorkspaceNodeModulesArchitectHost } from "@angular-devkit/architect/node";
@@ -65,39 +66,32 @@ async function localesForTarget(
   return { locales, defaultLocale };
 }
 
-const enum ExpectedBuilder {
-  APPLICATION = "@angular-devkit/build-angular:application",
-  BROWSER_ESBUILD = "@angular-devkit/build-angular:browser-esbuild",
-  DEPLOY = "@angular/fire:deploy",
-  DEV_SERVER = "@angular-devkit/build-angular:dev-server",
-  LEGACY_BROWSER = "@angular-devkit/build-angular:browser",
-  LEGACY_NGUNIVERSAL_PRERENDER = "@nguniversal/builders:prerender",
-  LEGACY_DEVKIT_PRERENDER = "@angular-devkit/build-angular:prerender",
-  LEGACY_SERVER = "@angular-devkit/build-angular:server",
-  LEGACY_NGUNIVERSAL_SSR_DEV_SERVER = "@nguniversal/builders:ssr-dev-server",
-  LEGACY_DEVKIT_SSR_DEV_SERVER = "@angular-devkit/build-angular:ssr-dev-server",
+export enum BuilderType {
+  DEPLOY = "deploy",
+  DEV_SERVER = "dev-server",
+  SSR_DEV_SERVER = "ssr-dev-server",
+  SERVER = "server",
+  BROWSER = "browser",
+  BROWSER_ESBUILD = "browser-esbuild",
+  APPLICATION = "application",
+  PRERENDER = "prerender",
 }
 
-const DEV_SERVER_TARGETS: string[] = [
-  ExpectedBuilder.DEV_SERVER,
-  ExpectedBuilder.LEGACY_NGUNIVERSAL_SSR_DEV_SERVER,
-  ExpectedBuilder.LEGACY_DEVKIT_SSR_DEV_SERVER,
-];
+const DEV_SERVER_TARGETS: BuilderType[] = [BuilderType.DEV_SERVER, BuilderType.SSR_DEV_SERVER];
 
-function getValidBuilders(purpose: BUILD_TARGET_PURPOSE): string[] {
+function getValidBuilderTypes(purpose: BUILD_TARGET_PURPOSE): BuilderType[] {
   return [
-    ExpectedBuilder.APPLICATION,
-    ExpectedBuilder.BROWSER_ESBUILD,
-    ExpectedBuilder.DEPLOY,
-    ExpectedBuilder.LEGACY_BROWSER,
-    ExpectedBuilder.LEGACY_DEVKIT_PRERENDER,
-    ExpectedBuilder.LEGACY_NGUNIVERSAL_PRERENDER,
+    BuilderType.APPLICATION,
+    BuilderType.BROWSER_ESBUILD,
+    BuilderType.DEPLOY,
+    BuilderType.BROWSER,
+    BuilderType.PRERENDER,
     ...(purpose === "deploy" ? [] : DEV_SERVER_TARGETS),
   ];
 }
 
 export async function getAllTargets(purpose: BUILD_TARGET_PURPOSE, dir: string) {
-  const validBuilders = getValidBuilders(purpose);
+  const validBuilderTypes = getValidBuilderTypes(purpose);
   const [{ NodeJsAsyncHost }, { workspaces }, { targetStringFromTarget }] = await Promise.all([
     relativeRequire(dir, "@angular-devkit/core/node"),
     relativeRequire(dir, "@angular-devkit/core"),
@@ -110,7 +104,10 @@ export async function getAllTargets(purpose: BUILD_TARGET_PURPOSE, dir: string) 
   workspace.projects.forEach((projectDefinition, project) => {
     if (projectDefinition.extensions.projectType !== "application") return;
     projectDefinition.targets.forEach((targetDefinition, target) => {
-      if (!validBuilders.includes(targetDefinition.builder)) return;
+      const builderType = getBuilderType(targetDefinition.builder);
+      if (builderType && !validBuilderTypes.includes(builderType)) {
+        return;
+      }
       const configurations = Object.keys(targetDefinition.configurations || {});
       if (!configurations.includes("production")) configurations.push("production");
       if (!configurations.includes("development")) configurations.push("development");
@@ -177,44 +174,41 @@ export async function getContext(dir: string, targetOrConfiguration?: string) {
     if (apps.length === 1) project = apps[0];
   }
 
-  if (!project)
-    throw new FirebaseError(
-      "Unable to determine the application to deploy, specify a target via the FIREBASE_FRAMEWORKS_BUILD_TARGET environment variable",
-    );
+  if (!project) {
+    throwCannotDetermineTarget();
+  }
 
   const workspaceProject = workspace.projects.get(project);
   if (!workspaceProject) throw new FirebaseError(`No project ${project} found.`);
 
   if (overrideTarget) {
     const target = workspaceProject.targets.get(overrideTarget.target)!;
-    const builder = target.builder;
-    switch (builder) {
-      case ExpectedBuilder.DEPLOY:
+    const builderType = getBuilderType(target.builder);
+    switch (builderType) {
+      case BuilderType.DEPLOY:
         deployTarget = overrideTarget;
         break;
-      case ExpectedBuilder.APPLICATION:
+      case BuilderType.APPLICATION:
         buildTarget = overrideTarget;
         break;
-      case ExpectedBuilder.BROWSER_ESBUILD:
-      case ExpectedBuilder.LEGACY_BROWSER:
+      case BuilderType.BROWSER:
+      case BuilderType.BROWSER_ESBUILD:
         browserTarget = overrideTarget;
         break;
-      case ExpectedBuilder.LEGACY_DEVKIT_PRERENDER:
-      case ExpectedBuilder.LEGACY_NGUNIVERSAL_PRERENDER:
+      case BuilderType.PRERENDER:
         prerenderTarget = overrideTarget;
         break;
-      case ExpectedBuilder.DEV_SERVER:
-      case ExpectedBuilder.LEGACY_NGUNIVERSAL_SSR_DEV_SERVER:
-      case ExpectedBuilder.LEGACY_DEVKIT_SSR_DEV_SERVER:
+      case BuilderType.DEV_SERVER:
+      case BuilderType.SSR_DEV_SERVER:
         serveTarget = overrideTarget;
         break;
       default:
-        throw new FirebaseError(`builder ${builder} not known.`);
+        throw new FirebaseError(`builder type ${builderType} not known.`);
     }
   } else if (workspaceProject.targets.has("deploy")) {
     const { builder, defaultConfiguration = "production" } =
       workspaceProject.targets.get("deploy")!;
-    if (builder === ExpectedBuilder.DEPLOY) {
+    if (getBuilderType(builder) === BuilderType.DEPLOY) {
       deployTarget = {
         project,
         target: "deploy",
@@ -294,15 +288,13 @@ export async function getContext(dir: string, targetOrConfiguration?: string) {
     if (!buildTarget && !browserTarget && workspaceProject.targets.has("build")) {
       const { builder, defaultConfiguration = "production" } =
         workspaceProject.targets.get("build")!;
+      const builderType = getBuilderType(builder);
       const target = {
         project,
         target: "build",
         configuration: configuration || defaultConfiguration,
       };
-      if (
-        builder === ExpectedBuilder.LEGACY_BROWSER ||
-        builder === ExpectedBuilder.BROWSER_ESBUILD
-      ) {
+      if (builderType === BuilderType.BROWSER || builderType === BuilderType.BROWSER_ESBUILD) {
         browserTarget = target;
       } else {
         buildTarget = target;
@@ -353,20 +345,19 @@ export async function getContext(dir: string, targetOrConfiguration?: string) {
       const definition = workspaceProject.targets.get(target.target);
       if (!definition) throw new FirebaseError(`${target} could not be found in your angular.json`);
       const { builder } = definition;
-      if (target === deployTarget && builder === ExpectedBuilder.DEPLOY) continue;
-      if (target === buildTarget && builder === ExpectedBuilder.APPLICATION) continue;
-      if (target === browserTarget && builder === ExpectedBuilder.BROWSER_ESBUILD) continue;
-      if (target === browserTarget && builder === ExpectedBuilder.LEGACY_BROWSER) continue;
-      if (target === prerenderTarget && builder === ExpectedBuilder.LEGACY_DEVKIT_PRERENDER)
-        continue;
-      if (target === prerenderTarget && builder === ExpectedBuilder.LEGACY_NGUNIVERSAL_PRERENDER)
-        continue;
-      if (target === serverTarget && builder === ExpectedBuilder.LEGACY_SERVER) continue;
-      if (target === serveTarget && builder === ExpectedBuilder.LEGACY_NGUNIVERSAL_SSR_DEV_SERVER)
-        continue;
-      if (target === serveTarget && builder === ExpectedBuilder.LEGACY_DEVKIT_SSR_DEV_SERVER)
-        continue;
-      if (target === serveTarget && builder === ExpectedBuilder.DEV_SERVER) continue;
+      const builderType = getBuilderType(builder);
+      if (target === deployTarget && builderType === BuilderType.DEPLOY) continue;
+      if (target === buildTarget && builderType === BuilderType.APPLICATION) continue;
+      if (target === buildTarget && builderType === BuilderType.BROWSER) continue;
+      if (target === browserTarget && builderType === BuilderType.BROWSER_ESBUILD) continue;
+      if (target === browserTarget && builderType === BuilderType.BROWSER) continue;
+      if (target === browserTarget && builderType === BuilderType.APPLICATION) continue;
+      if (target === prerenderTarget && builderType === BuilderType.PRERENDER) continue;
+      if (target === prerenderTarget && builderType === BuilderType.PRERENDER) continue;
+      if (target === serverTarget && builderType === BuilderType.SERVER) continue;
+      if (target === serveTarget && builderType === BuilderType.SSR_DEV_SERVER) continue;
+      if (target === serveTarget && builderType === BuilderType.DEV_SERVER) continue;
+      if (target === serveTarget && builderType === BuilderType.SERVER) continue;
       throw new FirebaseError(
         `${definition.builder} (${targetString}) is not a recognized builder. Please check your angular.json`,
       );
@@ -377,7 +368,8 @@ export async function getContext(dir: string, targetOrConfiguration?: string) {
   if (!buildOrBrowserTarget) {
     throw new FirebaseError(`No build target on ${project}`);
   }
-  const browserTargetOptions = await architectHost.getOptionsForTarget(buildOrBrowserTarget);
+
+  const browserTargetOptions = await tryToGetOptionsForTarget(architectHost, buildOrBrowserTarget);
   if (!browserTargetOptions) {
     const targetString = targetStringFromTarget(buildOrBrowserTarget);
     throw new FirebaseError(`Couldn't find options for ${targetString}.`);
@@ -386,7 +378,8 @@ export async function getContext(dir: string, targetOrConfiguration?: string) {
   const baseHref = browserTargetOptions.baseHref || "/";
   assertIsString(baseHref);
 
-  const buildTargetOptions = buildTarget && (await architectHost.getOptionsForTarget(buildTarget));
+  const buildTargetOptions =
+    buildTarget && (await tryToGetOptionsForTarget(architectHost, buildTarget));
   const ssr = buildTarget ? !!buildTargetOptions?.ssr : !!serverTarget;
 
   return {
@@ -412,15 +405,18 @@ export async function getBrowserConfig(sourceDir: string, configuration: string)
   if (!buildOrBrowserTarget) {
     throw new AssertionError({ message: "expected build or browser target defined" });
   }
-  const { locales, defaultLocale } = await localesForTarget(
-    sourceDir,
-    architectHost,
-    buildOrBrowserTarget,
-    workspaceProject,
-  );
-  const targetOptions = await architectHost.getOptionsForTarget(buildOrBrowserTarget);
+  const [{ locales, defaultLocale }, targetOptions, builderName] = await Promise.all([
+    localesForTarget(sourceDir, architectHost, buildOrBrowserTarget, workspaceProject),
+    architectHost.getOptionsForTarget(buildOrBrowserTarget),
+    architectHost.getBuilderNameForTarget(buildOrBrowserTarget),
+  ]);
+
   assertIsString(targetOptions?.outputPath);
-  const outputPath = join(targetOptions.outputPath, buildTarget ? "browser" : "");
+
+  const outputPath = join(
+    targetOptions.outputPath,
+    buildTarget && getBuilderType(builderName) === BuilderType.APPLICATION ? "browser" : "",
+  );
   return { locales, baseHref, outputPath, defaultLocale };
 }
 
@@ -556,4 +552,35 @@ export function getAngularVersion(cwd: string): string | undefined {
   if (!angularVersionSemver) return dependency.version;
 
   return angularVersionSemver.toString();
+}
+
+/**
+ * Try to get options for target, throw an error when expected target doesn't exist in the configuration.
+ */
+export async function tryToGetOptionsForTarget(
+  architectHost: WorkspaceNodeModulesArchitectHost,
+  target: Target,
+): Promise<JsonObject | null> {
+  return await architectHost.getOptionsForTarget(target).catch(throwCannotDetermineTarget);
+}
+
+function throwCannotDetermineTarget(error?: Error): never {
+  throw new FirebaseError(
+    `Unable to determine the application to deploy, specify a target via the FIREBASE_FRAMEWORKS_BUILD_TARGET environment variable.`,
+    { original: error },
+  );
+}
+
+/**
+ * Extracts the builder type from a full builder string (everything after the colon)
+ * @example
+ * getBuilderType("@angular-devkit/build-angular:browser") // returns "browser"
+ */
+export function getBuilderType(builder: string): BuilderType | null {
+  const colonIndex = builder.lastIndexOf(":");
+  const builderType = colonIndex >= 0 ? builder.slice(colonIndex + 1) : undefined;
+  if (!builderType || !Object.values(BuilderType).includes(builderType as BuilderType)) {
+    return null;
+  }
+  return builderType as BuilderType;
 }

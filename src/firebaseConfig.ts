@@ -7,7 +7,7 @@
 
 import type { HttpsOptions } from "firebase-functions/v2/https";
 import { IngressSetting, MemoryOption, VpcEgressSetting } from "firebase-functions/v2/options";
-import { Runtime, DecommissionedRuntime } from "./deploy/functions/runtimes/supported/types";
+import { ActiveRuntime } from "./deploy/functions/runtimes/supported/types";
 
 /**
  * Creates a type that requires at least one key to be present in an interface
@@ -167,7 +167,7 @@ export type FirestoreConfig = FirestoreSingle | FirestoreMultiple;
 export type FunctionConfig = {
   source?: string;
   ignore?: string[];
-  runtime?: Exclude<Runtime, DecommissionedRuntime>;
+  runtime?: ActiveRuntime;
   codebase?: string;
 } & Deployable;
 
@@ -203,6 +203,16 @@ export type EmulatorsConfig = {
     host?: string;
     port?: number;
   };
+  apphosting?: {
+    host?: string;
+    port?: number;
+    startCommand?: string;
+    /**
+     * @deprecated
+     */
+    startCommandOverride?: string;
+    rootDirectory?: string;
+  };
   pubsub?: {
     host?: string;
     port?: number;
@@ -222,7 +232,7 @@ export type EmulatorsConfig = {
   ui?: {
     enabled?: boolean;
     host?: string;
-    port?: number | string;
+    port?: number;
   };
   extensions?: {};
   eventarc?: {
@@ -233,6 +243,13 @@ export type EmulatorsConfig = {
   dataconnect?: {
     host?: string;
     port?: number;
+    postgresHost?: string;
+    postgresPort?: number;
+    dataDir?: string;
+  };
+  tasks?: {
+    host?: string;
+    port?: number;
   };
 };
 
@@ -241,13 +258,22 @@ export type ExtensionsConfig = Record<string, string>;
 export type DataConnectSingle = {
   // The directory containing dataconnect.yaml for this service
   source: string;
-  // The location to deploy this service to (ie 'us-central1')
-  location: string;
 } & Deployable;
 
 export type DataConnectMultiple = DataConnectSingle[];
 
 export type DataConnectConfig = DataConnectSingle | DataConnectMultiple;
+
+export type AppHostingSingle = {
+  backendId: string;
+  rootDir: string;
+  ignore: string[];
+  alwaysDeployFromSource?: boolean;
+};
+
+export type AppHostingMultiple = AppHostingSingle[];
+
+export type AppHostingConfig = AppHostingSingle | AppHostingMultiple;
 
 export type FirebaseConfig = {
   /**
@@ -263,4 +289,5 @@ export type FirebaseConfig = {
   emulators?: EmulatorsConfig;
   extensions?: ExtensionsConfig;
   dataconnect?: DataConnectConfig;
+  apphosting?: AppHostingConfig;
 };

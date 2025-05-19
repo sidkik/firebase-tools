@@ -358,6 +358,12 @@ export async function updateFunction(
   cloudFunction: Omit<CloudFunction, OutputOnlyFields>,
 ): Promise<Operation> {
   const endpoint = `/${cloudFunction.name}`;
+  cloudFunction.buildEnvironmentVariables = {
+    ...cloudFunction.buildEnvironmentVariables,
+    // Disable GCF from automatically running npm run build script
+    // https://cloud.google.com/functions/docs/release-notes
+    GOOGLE_NODE_RUN_SCRIPTS: "",
+  };
   // Keys in labels and environmentVariables and secretEnvironmentVariables are user defined,
   // so we don't recurse for field masks.
   const fieldMasks = proto.fieldMasks(
@@ -365,15 +371,8 @@ export async function updateFunction(
     /* doNotRecurseIn...=*/ "labels",
     "environmentVariables",
     "secretEnvironmentVariables",
+    "buildEnvironmentVariables",
   );
-
-  cloudFunction.buildEnvironmentVariables = {
-    ...cloudFunction.buildEnvironmentVariables,
-    // Disable GCF from automatically running npm run build script
-    // https://cloud.google.com/functions/docs/release-notes
-    GOOGLE_NODE_RUN_SCRIPTS: "",
-  };
-  fieldMasks.push("buildEnvironmentVariables");
 
   // Failure policy is always an explicit policy and is only signified by the presence or absence of
   // a protobuf.Empty value, so we have to manually add it in the missing case.
@@ -552,6 +551,7 @@ export function endpointFromFunction(gcfFunction: CloudFunction): backend.Endpoi
     "secretEnvironmentVariables",
     "sourceUploadUrl",
   );
+
   proto.renameIfPresent(endpoint, gcfFunction, "serviceAccount", "serviceAccountEmail");
   proto.convertIfPresent(
     endpoint,
@@ -576,6 +576,18 @@ export function endpointFromFunction(gcfFunction: CloudFunction): backend.Endpoi
   if (gcfFunction.labels?.[HASH_LABEL]) {
     endpoint.hash = gcfFunction.labels[HASH_LABEL];
   }
+  proto.convertIfPresent(endpoint, gcfFunction, "state", "status", (status) => {
+    if (status === "ACTIVE") {
+      return "ACTIVE";
+    } else if (status === "OFFLINE") {
+      return "FAILED";
+    } else if (status === "DEPLOY_IN_PROGRESS") {
+      return "DEPLOYING";
+    } else if (status === "DELETE_IN_PROGRESS") {
+      return "DELETING";
+    }
+    return "UNKONWN";
+  });
   return endpoint;
 }
 
@@ -666,7 +678,10 @@ export function functionFromEndpoint(
     "environmentVariables",
     "secretEnvironmentVariables",
   );
-  proto.renameIfPresent(gcfFunction, endpoint, "serviceAccountEmail", "serviceAccount");
+
+  proto.convertIfPresent(gcfFunction, endpoint, "serviceAccountEmail", "serviceAccount", (from) =>
+    !from ? null : proto.formatServiceAccount(from, endpoint.project, true /* removeTypePrefix */),
+  );
   proto.convertIfPresent(
     gcfFunction,
     endpoint,

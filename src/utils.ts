@@ -12,18 +12,18 @@ import * as open from "open";
 import * as ora from "ora";
 import * as process from "process";
 import { Readable } from "stream";
-import * as winston from "winston";
-import { SPLAT } from "triple-beam";
 import { AssertionError } from "assert";
-const stripAnsi = require("strip-ansi");
 import { getPortPromise as getPort } from "portfinder";
 
 import { configstore } from "./configstore";
-import { FirebaseError } from "./error";
+import { FirebaseError, getErrMsg, getError } from "./error";
 import { logger, LogLevel } from "./logger";
 import { LogDataOrUndefined } from "./emulator/loggingEmulator";
-import { promptOnce } from "./prompt";
-
+import { input, password } from "./prompt";
+import { readTemplateSync } from "./templates";
+import { isVSCodeExtension } from "./vsCodeUtils";
+import { Config } from "./config";
+import { dirExistsSync, fileExistsSync } from "./fsutils";
 export const IS_WINDOWS = process.platform === "win32";
 const SUCCESS_CHAR = IS_WINDOWS ? "+" : "✔";
 const WARNING_CHAR = IS_WINDOWS ? "!" : "⚠";
@@ -422,7 +422,7 @@ export async function promiseWhile<T>(
           return resolve(res);
         }
         setTimeout(run, interval);
-      } catch (err: any) {
+      } catch (err: unknown) {
         return promiseReject(err);
       }
     };
@@ -466,22 +466,6 @@ export async function promiseProps(obj: any): Promise<any> {
 }
 
 /**
- * Attempts to call JSON.stringify on an object, if it throws return the original value
- * @param value
- */
-export function tryStringify(value: any) {
-  if (typeof value === "string") {
-    return value;
-  }
-
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return value;
-  }
-}
-
-/**
  * Attempts to call JSON.parse on an object, if it throws return the original value
  * @param value
  */
@@ -498,34 +482,6 @@ export function tryParse(value: any) {
 }
 
 /**
- *
- */
-export function setupLoggers() {
-  if (process.env.DEBUG) {
-    logger.add(
-      new winston.transports.Console({
-        level: "debug",
-        format: winston.format.printf((info) => {
-          const segments = [info.message, ...(info[SPLAT] || [])].map(tryStringify);
-          return `${stripAnsi(segments.join(" "))}`;
-        }),
-      }),
-    );
-  } else if (process.env.IS_FIREBASE_CLI) {
-    logger.add(
-      new winston.transports.Console({
-        level: "info",
-        format: winston.format.printf((info) =>
-          [info.message, ...(info[SPLAT] || [])]
-            .filter((chunk) => typeof chunk === "string")
-            .join(" "),
-        ),
-      }),
-    );
-  }
-}
-
-/**
  * Runs a given function inside a spinner with a message
  */
 export async function promiseWithSpinner<T>(action: () => Promise<T>, message: string): Promise<T> {
@@ -534,7 +490,7 @@ export async function promiseWithSpinner<T>(action: () => Promise<T>, message: s
   try {
     data = await action();
     spinner.succeed();
-  } catch (err: any) {
+  } catch (err: unknown) {
     spinner.fail();
     throw err;
   }
@@ -600,13 +556,6 @@ export function datetimeString(d: Date): string {
  */
 export function isCloudEnvironment() {
   return !!process.env.CODESPACES || !!process.env.GOOGLE_CLOUD_WORKSTATIONS;
-}
-
-/**
- * Detect if code is running in a VSCode Extension
- */
-export function isVSCodeExtension(): boolean {
-  return !!process.env.VSCODE_CWD;
 }
 
 /**
@@ -800,8 +749,7 @@ export async function openInBrowserPopup(
   url: string,
   buttonText: string,
 ): Promise<{ url: string; cleanup: () => void }> {
-  const popupPage = fs
-    .readFileSync(path.join(__dirname, "../templates/popup.html"), { encoding: "utf-8" })
+  const popupPage = readTemplateSync("popup.html")
     .replace("${url}", url)
     .replace("${buttonText}", buttonText);
 
@@ -877,8 +825,8 @@ export function readFileFromDirectory(
 export function wrappedSafeLoad(source: string): any {
   try {
     return yaml.parse(source);
-  } catch (err: any) {
-    throw new FirebaseError(`YAML Error: ${err.message}`, { original: err });
+  } catch (err: unknown) {
+    throw new FirebaseError(`YAML Error: ${getErrMsg(err)}`, { original: getError(err) });
   }
 }
 
@@ -906,14 +854,72 @@ export function generateId(n = 6): string {
  */
 export function readSecretValue(prompt: string, dataFile?: string): Promise<string> {
   if ((!dataFile || dataFile === "-") && tty.isatty(0)) {
-    return promptOnce({
-      type: "password",
-      message: prompt,
-    });
+    return password({ message: prompt });
   }
   let input: string | number = 0;
   if (dataFile && dataFile !== "-") {
     input = dataFile;
   }
-  return Promise.resolve(fs.readFileSync(input, "utf-8"));
+  try {
+    return Promise.resolve(fs.readFileSync(input, "utf-8"));
+  } catch (e: any) {
+    if (e.code === "ENOENT") {
+      throw new FirebaseError(`File not found: ${input}`, { original: e });
+    }
+    throw e;
+  }
+}
+
+/**
+ * Updates or creates a .gitignore file with the given entries in the given path
+ */
+export function updateOrCreateGitignore(dirPath: string, entries: string[]) {
+  const gitignorePath = path.join(dirPath, ".gitignore");
+
+  if (!fs.existsSync(gitignorePath)) {
+    fs.writeFileSync(gitignorePath, entries.join("\n"));
+    return;
+  }
+
+  let content = fs.readFileSync(gitignorePath, "utf-8");
+  for (const entry of entries) {
+    if (!content.includes(entry)) {
+      content += `\n${entry}\n`;
+    }
+  }
+
+  fs.writeFileSync(gitignorePath, content);
+}
+
+/**
+ * Prompts for a directory name, and reprompts if that path does not exist
+ * N.B. Moved from the original prompt library to this file because it brings in a lot of
+ * dependencies. Moved to "utils" because this file arleady brings in the world.
+ */
+export async function promptForDirectory(args: {
+  message: string;
+  config: Config;
+  default?: boolean;
+  relativeTo?: string;
+}): Promise<string> {
+  let dir: string = "";
+  while (!dir) {
+    const promptPath = await input(args.message);
+    let target: string;
+    if (args.relativeTo) {
+      target = path.resolve(args.relativeTo, promptPath);
+    } else {
+      target = args.config.path(promptPath);
+    }
+    if (fileExistsSync(target)) {
+      logger.error(
+        `Expected a directory, but ${target} is a file. Please provide a path to a directory.`,
+      );
+    } else if (!dirExistsSync(target)) {
+      logger.error(`Directory ${target} not found. Please provide a path to a directory`);
+    } else {
+      dir = target;
+    }
+  }
+  return dir;
 }

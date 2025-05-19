@@ -1,18 +1,13 @@
 import * as clc from "colorette";
-import * as fs from "fs";
 
 import { logger } from "../../logger";
-import { promptOnce } from "../../prompt";
-import { ensureLocationSet } from "../../ensureCloudResourceLocation";
+import { input } from "../../prompt";
+import { readTemplateSync } from "../../templates";
 
-const RULES_TEMPLATE = fs.readFileSync(
-  __dirname + "/../../../templates/init/storage/storage.rules",
-  "utf8",
-);
+const RULES_TEMPLATE = readTemplateSync("init/storage/storage.rules");
 
 export async function doSetup(setup: any, config: any): Promise<void> {
   setup.config.storage = {};
-  ensureLocationSet(setup.projectLocation, "Cloud Storage");
 
   logger.info();
   logger.info("Firebase Storage Security Rules allow you to define how and when to allow");
@@ -20,9 +15,7 @@ export async function doSetup(setup: any, config: any): Promise<void> {
   logger.info("and publish them with " + clc.bold("firebase deploy") + ".");
   logger.info();
 
-  const storageRulesFile = await promptOnce({
-    type: "input",
-    name: "rules",
+  const storageRulesFile = await input({
     message: "What file should be used for Storage Rules?",
     default: "storage.rules",
   });

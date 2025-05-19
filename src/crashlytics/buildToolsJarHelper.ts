@@ -6,14 +6,14 @@ import * as spawn from "cross-spawn";
 import * as downloadUtils from "../downloadUtils";
 import { FirebaseError } from "../error";
 import { logger } from "../logger";
-import * as rimraf from "rimraf";
+import { rmSync } from "node:fs";
 import * as utils from "../utils";
 
 const JAR_CACHE_DIR =
   process.env.FIREBASE_CRASHLYTICS_BUILDTOOLS_PATH ||
   path.join(os.homedir(), ".cache", "firebase", "crashlytics", "buildtools");
 
-const JAR_VERSION = "2.9.2";
+const JAR_VERSION = "3.0.3";
 const JAR_URL = `https://dl.google.com/android/maven2/com/google/firebase/firebase-crashlytics-buildtools/${JAR_VERSION}/firebase-crashlytics-buildtools-${JAR_VERSION}.jar`;
 
 /**
@@ -22,6 +22,7 @@ const JAR_URL = `https://dl.google.com/android/maven2/com/google/firebase/fireba
 export async function fetchBuildtoolsJar(): Promise<string> {
   // If you set CRASHLYTICS_LOCAL_JAR to a path it will override the downloaded buildtools.jar
   if (process.env.CRASHLYTICS_LOCAL_JAR) {
+    logger.debug(`Using local Crashlytics Jar override at ${process.env.CRASHLYTICS_LOCAL_JAR}`);
     return process.env.CRASHLYTICS_LOCAL_JAR;
   }
 
@@ -38,7 +39,7 @@ export async function fetchBuildtoolsJar(): Promise<string> {
     logger.debug(
       `Deleting Jar cache at ${JAR_CACHE_DIR} because the CLI was run with a newer Jar version`,
     );
-    rimraf.sync(JAR_CACHE_DIR);
+    rmSync(JAR_CACHE_DIR, { recursive: true });
   }
   utils.logBullet("Downloading crashlytics-buildtools.jar to " + jarPath);
   utils.logBullet(

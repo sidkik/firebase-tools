@@ -11,6 +11,9 @@ import { EmulatorRegistry } from "./registry";
 import { FunctionsEmulator } from "./functionsEmulator";
 import { ExpressBasedEmulator } from "./ExpressBasedEmulator";
 import { PortName } from "./portUtils";
+import { DataConnectEmulator } from "./dataconnectEmulator";
+import { isVSCodeExtension } from "../vsCodeUtils";
+import { maybeUsePortForwarding } from "./env";
 
 // We use the CLI version from package.json
 const pkg = require("../../package.json");
@@ -27,7 +30,7 @@ export interface EmulatorHubArgs {
   listenForEmulator: Record<PortName, ListenSpec[]>;
 }
 
-export type GetEmulatorsResponse = Record<string, EmulatorInfo>;
+export type GetEmulatorsResponse = Partial<Record<Emulators, EmulatorInfo>>;
 
 export class EmulatorHub extends ExpressBasedEmulator {
   static CLI_VERSION = pkg.version;
@@ -35,6 +38,7 @@ export class EmulatorHub extends ExpressBasedEmulator {
   static PATH_DISABLE_FUNCTIONS = "/functions/disableBackgroundTriggers";
   static PATH_ENABLE_FUNCTIONS = "/functions/enableBackgroundTriggers";
   static PATH_EMULATORS = "/emulators";
+  static PATH_CLEAR_DATA_CONNECT = "/dataconnect/clearData";
 
   /**
    * Given a project ID, find and read the Locator file for the emulator hub.
@@ -50,7 +54,8 @@ export class EmulatorHub extends ExpressBasedEmulator {
     const data = fs.readFileSync(locatorPath, "utf8").toString();
     const locator = JSON.parse(data) as Locator;
 
-    if (locator.version !== this.CLI_VERSION) {
+    // TODO: In case the locator file format is changed, handle issues with format incompatability
+    if (!isVSCodeExtension() && locator.version !== this.CLI_VERSION) {
       logger.debug(`Found locator with mismatched version, ignoring: ${JSON.stringify(locator)}`);
       return undefined;
     }
@@ -75,6 +80,17 @@ export class EmulatorHub extends ExpressBasedEmulator {
     await this.writeLocatorFile();
   }
 
+  getRunningEmulatorsMapping(): GetEmulatorsResponse {
+    const emulators: GetEmulatorsResponse = {};
+    for (const info of EmulatorRegistry.listRunningWithInfo()) {
+      emulators[info.name] = maybeUsePortForwarding({
+        listen: this.args.listenForEmulator[info.name],
+        ...info,
+      });
+    }
+    return emulators;
+  }
+
   protected override async createExpressApp(): Promise<express.Express> {
     const app = await super.createExpressApp();
     app.get("/", (req, res) => {
@@ -87,14 +103,7 @@ export class EmulatorHub extends ExpressBasedEmulator {
     });
 
     app.get(EmulatorHub.PATH_EMULATORS, (req, res) => {
-      const body: GetEmulatorsResponse = {};
-      for (const info of EmulatorRegistry.listRunningWithInfo()) {
-        body[info.name] = {
-          listen: this.args.listenForEmulator[info.name],
-          ...info,
-        };
-      }
-      res.json(body);
+      res.json(this.getRunningEmulatorsMapping());
     });
 
     app.post(EmulatorHub.PATH_EXPORT, async (req, res) => {
@@ -158,6 +167,24 @@ export class EmulatorHub extends ExpressBasedEmulator {
       res.status(200).json({ enabled: true });
     });
 
+    app.post(EmulatorHub.PATH_CLEAR_DATA_CONNECT, async (req, res) => {
+      if (req.headers.origin) {
+        res.status(403).json({
+          message: `Clear Data Connect cannot be triggered by external callers.`,
+        });
+      }
+      utils.logLabeledBullet("emulators", `Clearing data from Data Connect data sources.`);
+
+      const instance = EmulatorRegistry.get(Emulators.DATACONNECT) as DataConnectEmulator;
+      if (!instance) {
+        res.status(400).json({ error: "The Data Connect emulator is not running." });
+        return;
+      }
+
+      await instance.clearData();
+      res.status(200).json({ success: true });
+    });
+
     return app;
   }
 
@@ -214,7 +241,8 @@ export class EmulatorHub extends ExpressBasedEmulator {
     const locatorPath = EmulatorHub.getLocatorFilePath(this.args.projectId);
     return new Promise((resolve, reject) => {
       fs.unlink(locatorPath, (e) => {
-        if (e) {
+        // If the file is already deleted, no need to throw.
+        if (e && e.code !== "ENOENT") {
           reject(e);
         } else {
           resolve();

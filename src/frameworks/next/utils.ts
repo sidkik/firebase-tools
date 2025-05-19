@@ -1,11 +1,10 @@
 import { existsSync } from "fs";
 import { pathExists } from "fs-extra";
-import { basename, extname, join, posix, sep } from "path";
+import { basename, extname, join, posix, sep, resolve, dirname } from "path";
 import { readFile } from "fs/promises";
-import { sync as globSync } from "glob";
-import * as glob from "glob";
+import { glob, sync as globSync } from "glob";
 import type { PagesManifest } from "next/dist/build/webpack/plugins/pages-manifest-plugin";
-import { coerce } from "semver";
+import { coerce, satisfies } from "semver";
 
 import { findDependency, isUrl, readJSON } from "../utils";
 import type {
@@ -32,9 +31,12 @@ import {
   MIDDLEWARE_MANIFEST,
   WEBPACK_LAYERS,
   CONFIG_FILES,
+  ESBUILD_VERSION,
 } from "./constants";
 import { dirExistsSync, fileExistsSync } from "../../fsutils";
 import { IS_WINDOWS } from "../../utils";
+import { execSync } from "child_process";
+import { FirebaseError } from "../../error";
 
 export const I18N_SOURCE = /\/:nextInternalLocale(\([^\)]+\))?/;
 
@@ -363,15 +365,16 @@ export function getNonStaticServerComponents(
 }
 
 /**
- * Get headers from .meta files
+ * Get metadata from .meta files
  */
-export async function getHeadersFromMetaFiles(
+export async function getAppMetadataFromMetaFiles(
   sourceDir: string,
   distDir: string,
   basePath: string,
   appPathRoutesManifest: AppPathRoutesManifest,
-): Promise<HostingHeadersWithSource[]> {
+): Promise<{ headers: HostingHeadersWithSource[]; pprRoutes: string[] }> {
   const headers: HostingHeadersWithSource[] = [];
+  const pprRoutes: string[] = [];
 
   await Promise.all(
     Object.entries(appPathRoutesManifest).map(async ([key, source]) => {
@@ -383,17 +386,20 @@ export async function getHeadersFromMetaFiles(
       const metadataPath = `${routePath}.meta`;
 
       if (dirExistsSync(routePath) && fileExistsSync(metadataPath)) {
-        const meta = await readJSON<{ headers?: Record<string, string> }>(metadataPath);
+        const meta = await readJSON<{ headers?: Record<string, string>; postponed?: string }>(
+          metadataPath,
+        );
         if (meta.headers)
           headers.push({
             source: posix.join(basePath, source),
             headers: Object.entries(meta.headers).map(([key, value]) => ({ key, value })),
           });
+        if (meta.postponed) pprRoutes.push(source);
       }
     }),
   );
 
-  return headers;
+  return { headers, pprRoutes };
 }
 
 /**
@@ -471,23 +477,12 @@ export async function getProductionDistDirFiles(
   sourceDir: string,
   distDir: string,
 ): Promise<string[]> {
-  const productionDistDirFiles = await new Promise<string[]>((resolve, reject) =>
-    glob(
-      "**",
-      {
-        ignore: [join("cache", "webpack", "*-development", "**"), join("cache", "eslint", "**")],
-        cwd: join(sourceDir, distDir),
-        nodir: true,
-        absolute: false,
-      },
-      (err, matches) => {
-        if (err) reject(err);
-        resolve(matches);
-      },
-    ),
-  );
-
-  return productionDistDirFiles;
+  return glob("**", {
+    ignore: [join("cache", "webpack", "*-development", "**"), join("cache", "eslint", "**")],
+    cwd: join(sourceDir, distDir),
+    nodir: true,
+    absolute: false,
+  });
 }
 
 /**
@@ -500,4 +495,61 @@ export async function whichNextConfigFile(dir: string): Promise<NextConfigFileNa
   }
 
   return null;
+}
+
+/**
+ * Helper function to find the path of esbuild using `npm which`
+ */
+export function findEsbuildPath(): string | null {
+  try {
+    const esbuildBinPath = execSync("npx which esbuild", { encoding: "utf8" })?.trim();
+    if (!esbuildBinPath) {
+      return null;
+    }
+
+    const globalVersion = getGlobalEsbuildVersion(esbuildBinPath);
+    if (globalVersion && !satisfies(globalVersion, ESBUILD_VERSION)) {
+      console.warn(
+        `Warning: Global esbuild version (${globalVersion}) does not match the required version (${ESBUILD_VERSION}).`,
+      );
+    }
+    return resolve(dirname(esbuildBinPath), "../esbuild");
+  } catch (error) {
+    console.error(`Failed to find esbuild with npx which: ${error}`);
+    return null;
+  }
+}
+
+/**
+ * Helper function to get the global esbuild version
+ */
+export function getGlobalEsbuildVersion(binPath: string): string | null {
+  try {
+    const versionOutput = execSync(`"${binPath}" --version`, { encoding: "utf8" })?.trim();
+    if (!versionOutput) {
+      return null;
+    }
+
+    const versionMatch = versionOutput.match(/(\d+\.\d+\.\d+)/);
+    return versionMatch ? versionMatch[0] : null;
+  } catch (error) {
+    console.error(`Failed to get global esbuild version: ${error}`);
+    return null;
+  }
+}
+
+/**
+ * Helper function to install esbuild dynamically
+ */
+export function installEsbuild(version: string): void {
+  const installCommand = `npm install esbuild@${version} --no-save`;
+  try {
+    execSync(installCommand, { stdio: "inherit" });
+  } catch (error: any) {
+    if (error instanceof FirebaseError) {
+      throw error;
+    } else {
+      throw new FirebaseError(`Failed to install esbuild: ${error}`, { original: error });
+    }
+  }
 }

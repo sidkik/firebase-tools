@@ -1,6 +1,8 @@
 import { Client } from "../apiv2";
 import { developerConnectOrigin, developerConnectP4SADomain } from "../api";
 import { generateServiceIdentityAndPoll } from "./serviceusage";
+import { FirebaseError } from "../error";
+import { extractRepoSlugFromUri } from "../apphosting/githubConnections";
 
 const PAGE_SIZE_MAX = 1000;
 const LOCATION_OVERRIDE = process.env.FIREBASE_DEVELOPERCONNECT_LOCATION_OVERRIDE;
@@ -40,6 +42,14 @@ export interface GitHubConfig {
   authorizerCredential?: OAuthCredential;
   appInstallationId?: string;
   installationUri?: string;
+}
+
+type InstallationType = "user" | "organization";
+
+export interface Installation {
+  id: string;
+  name: string;
+  type: InstallationType;
 }
 
 type InstallationStage =
@@ -113,6 +123,19 @@ export interface LinkableGitRepositories {
 
 export interface LinkableGitRepository {
   cloneUri: string;
+}
+
+interface GitRepositoryLinkReadToken {
+  token: string;
+  expirationTime: string;
+  gitUsername: string;
+}
+
+export interface GitRepositoryLinkDetails {
+  repoLink: GitRepositoryLink;
+  owner: string;
+  repo: string;
+  readToken: GitRepositoryLinkReadToken;
 }
 
 /**
@@ -235,7 +258,67 @@ export async function listAllLinkableGitRepositories(
 }
 
 /**
- * Creates a GitRepositoryLink.Upon linking a Git Repository, Developer
+ * Lists all branches for a given repo. Returns a set of branches.
+ */
+export async function listAllBranches(repoLinkName: string): Promise<Set<string>> {
+  const branches = new Set<string>();
+
+  const getNextPage = async (pageToken = ""): Promise<void> => {
+    const res = await client.get<{
+      refNames: string[];
+      nextPageToken?: string;
+    }>(`${repoLinkName}:fetchGitRefs`, {
+      queryParams: {
+        refType: "BRANCH",
+        pageSize: PAGE_SIZE_MAX,
+        pageToken,
+      },
+    });
+    if (Array.isArray(res.body.refNames)) {
+      res.body.refNames.forEach((branch) => {
+        branches.add(branch);
+      });
+    }
+    if (res.body.nextPageToken) {
+      await getNextPage(res.body.nextPageToken);
+    }
+  };
+
+  await getNextPage();
+
+  return branches;
+}
+
+/**
+ * Fetch all GitHub installations available to the oauth token referenced by
+ * the given connection
+ */
+export async function fetchGitHubInstallations(
+  projectId: string,
+  location: string,
+  connectionId: string,
+): Promise<Installation[]> {
+  const name = `projects/${projectId}/locations/${LOCATION_OVERRIDE ?? location}/connections/${connectionId}:fetchGitHubInstallations`;
+  const res = await client.get<{ installations: Installation[] }>(name);
+
+  return res.body.installations;
+}
+
+/**
+ * Splits a Git Repository Link resource name into its parts.
+ */
+export function parseGitRepositoryLinkName(gitRepositoryLinkName: string): {
+  projectName: string;
+  location: string;
+  connectionName: string;
+  id: string;
+} {
+  const [, projectName, , location, , connectionName, , id] = gitRepositoryLinkName.split("/");
+  return { projectName, location, connectionName, id };
+}
+
+/**
+ * Creates a GitRepositoryLink. Upon linking a Git Repository, Developer
  * Connect will configure the Git Repository to send webhook events to
  * Developer Connect.
  */
@@ -272,6 +355,29 @@ export async function getGitRepositoryLink(
 }
 
 /**
+ * Fetch the read token for a GitRepositoryLink
+ */
+export async function fetchGitRepositoryLinkReadToken(
+  projectId: string,
+  location: string,
+  connectionId: string,
+  gitRepositoryLinkId: string,
+): Promise<GitRepositoryLinkReadToken> {
+  const name = `projects/${projectId}/locations/${LOCATION_OVERRIDE ?? location}/connections/${connectionId}/gitRepositoryLinks/${gitRepositoryLinkId}:fetchReadToken`;
+  const res = await client.post<unknown, GitRepositoryLinkReadToken>(name);
+  return res.body;
+}
+
+/**
+ * sorts the given list of connections by create_time from earliest to latest
+ */
+export function sortConnectionsByCreateTime(connections: Connection[]) {
+  return connections.sort((a, b) => {
+    return Date.parse(a.createTime!) - Date.parse(b.createTime!);
+  });
+}
+
+/**
  * Returns email associated with the Developer Connect Service Agent
  */
 export function serviceAgentEmail(projectNumber: string): string {
@@ -292,4 +398,58 @@ export async function generateP4SA(projectNumber: string): Promise<void> {
     new URL(devConnectOrigin).hostname,
     "apphosting",
   );
+}
+
+/**
+ * Given a DevConnect GitRepositoryLink resource name, extracts the
+ * names of the connection and git repository link
+ */
+export function extractGitRepositoryLinkComponents(path: string): {
+  connection: string | null;
+  gitRepoLink: string | null;
+} {
+  const connectionMatch = /connections\/([^\/]+)/.exec(path);
+  const repositoryMatch = /gitRepositoryLinks\/([^\/]+)/.exec(path);
+
+  const connection = connectionMatch ? connectionMatch[1] : null;
+  const gitRepoLink = repositoryMatch ? repositoryMatch[1] : null;
+
+  return { connection, gitRepoLink };
+}
+
+/**
+ * Given a GitRepositoryLink resource path, retrieves the GitRepositoryLink resource,
+ * owner, repository name, and read token for the Git repository
+ */
+export async function getRepoDetailsFromBackend(
+  projectId: string,
+  location: string,
+  gitRepoLinkPath: string,
+): Promise<GitRepositoryLinkDetails> {
+  const { connection, gitRepoLink } = extractGitRepositoryLinkComponents(gitRepoLinkPath);
+  if (!connection || !gitRepoLink) {
+    throw new FirebaseError(
+      `Failed to extract connection or repository resource names from backend repository name.`,
+    );
+  }
+  const repoLink = await getGitRepositoryLink(projectId, location, connection, gitRepoLink);
+  const repoSlug = extractRepoSlugFromUri(repoLink.cloneUri);
+  const owner = repoSlug?.split("/")[0];
+  const repo = repoSlug?.split("/")[1];
+  if (!owner || !repo) {
+    throw new FirebaseError("Failed to parse owner and repo from git repository link");
+  }
+  const readToken = await fetchGitRepositoryLinkReadToken(
+    projectId,
+    location,
+    connection,
+    gitRepoLink,
+  );
+
+  return {
+    repoLink,
+    owner,
+    repo,
+    readToken,
+  };
 }

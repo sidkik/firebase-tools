@@ -59,23 +59,31 @@ export type WireEndpoint = build.Triggered &
       egressSettings?: build.VpcEgressSetting | null;
     } | null;
     ingressSettings?: build.IngressSetting | null;
-    serviceAccount?: string | null;
+    serviceAccount?: build.Field<string>;
     // Note: Historically we used "serviceAccountEmail" to refer to a thing that
     // might not be an email (e.g. it might be "myAccount@"" to be project-relative)
     // We now use "serviceAccount" but maintain backwards compatibility in the
     // wire format for the time being.
-    serviceAccountEmail?: string | null;
+    serviceAccountEmail?: build.Field<string>;
     region?: build.ListField;
     entryPoint: string;
     platform?: build.FunctionsPlatform;
     secretEnvironmentVariables?: Array<ManifestSecretEnv> | null;
   };
 
+export type WireExtension = {
+  params: Record<string, string>;
+  ref?: string;
+  localPath?: string;
+  events: string[];
+};
+
 export interface WireManifest {
   specVersion: string;
   params?: params.Param[];
   requiredAPIs?: build.RequiredApi[];
   endpoints: Record<string, WireEndpoint>;
+  extensions?: Record<string, WireExtension>;
 }
 
 /** Returns a Build from a v1alpha1 Manifest. */
@@ -92,6 +100,7 @@ export function buildFromV1Alpha1(
     params: "array",
     requiredAPIs: "array",
     endpoints: "object",
+    extensions: "object",
   });
   const bd: build.Build = build.empty();
   bd.params = manifest.params || [];
@@ -101,6 +110,15 @@ export function buildFromV1Alpha1(
     assertBuildEndpoint(me, id);
     const be: build.Endpoint = parseEndpointForBuild(id, me, project, region, runtime);
     bd.endpoints[id] = be;
+  }
+  if (manifest.extensions) {
+    bd.extensions = {};
+    for (const id of Object.keys(manifest.extensions)) {
+      const me: WireExtension = manifest.extensions[id];
+      assertBuildExtension(me, id);
+      const be: build.DynamicExtension = parseExtensionForBuild(me);
+      bd.extensions[id] = be;
+    }
   }
   return bd;
 }
@@ -131,8 +149,8 @@ function assertBuildEndpoint(ep: WireEndpoint, id: string): void {
     maxInstances: "Field<number>?",
     minInstances: "Field<number>?",
     concurrency: "Field<number>?",
-    serviceAccount: "string?",
-    serviceAccountEmail: "string?",
+    serviceAccount: "Field<string>?",
+    serviceAccountEmail: "Field<string>?",
     timeoutSeconds: "Field<number>?",
     vpc: "object?",
     labels: "object?",
@@ -187,8 +205,8 @@ function assertBuildEndpoint(ep: WireEndpoint, id: string): void {
       eventType: "string",
       retry: "Field<boolean>",
       region: "Field<string>",
-      serviceAccount: "string?",
-      serviceAccountEmail: "string?",
+      serviceAccount: "Field<string>?",
+      serviceAccountEmail: "Field<string>?",
       channel: "string",
     });
   } else if (build.isHttpsTriggered(ep)) {
@@ -196,7 +214,9 @@ function assertBuildEndpoint(ep: WireEndpoint, id: string): void {
       invoker: "array?",
     });
   } else if (build.isCallableTriggered(ep)) {
-    // no-op
+    assertKeyTypes(prefix + ".callableTrigger", ep.callableTrigger, {
+      genkitAction: "string?",
+    });
   } else if (build.isScheduleTriggered(ep)) {
     assertKeyTypes(prefix + ".scheduleTrigger", ep.scheduleTrigger, {
       schedule: "Field<string>",
@@ -245,6 +265,7 @@ function assertBuildEndpoint(ep: WireEndpoint, id: string): void {
       options: "object",
     });
   } else {
+    // TODO: Replace with assertExhaustive, which needs some type magic here because we have an any
     throw new FirebaseError(
       `Do not recognize trigger type for endpoint ${id}. Try upgrading ` +
         "firebase-tools with npm install -g firebase-tools@latest",
@@ -292,6 +313,7 @@ function parseEndpointForBuild(
     copyIfPresent(triggered.httpsTrigger, ep.httpsTrigger, "invoker");
   } else if (build.isCallableTriggered(ep)) {
     triggered = { callableTrigger: {} };
+    copyIfPresent(triggered.callableTrigger, ep.callableTrigger, "genkitAction");
   } else if (build.isScheduleTriggered(ep)) {
     const st: build.ScheduleTrigger = {
       // TODO: consider adding validation for fields like this that reject
@@ -419,6 +441,49 @@ function parseEndpointForBuild(
       return { key, secret: secret || key, projectId: project } as build.SecretEnvVar;
     });
   });
+  return parsed;
+}
+
+function assertBuildExtension(ex: WireExtension, id: string): void {
+  const prefix = `extensions[${id}]`;
+  assertKeyTypes(prefix, ex, {
+    params: "object",
+    ref: "string?",
+    localPath: "string?",
+    events: "array",
+  });
+
+  let refOrPath = 0;
+  if (ex.ref) {
+    refOrPath++;
+  }
+  if (ex.localPath) {
+    refOrPath++;
+  }
+  if (refOrPath === 0) {
+    throw new FirebaseError(
+      `Expected either extension reference or local path in extension: ${id}`,
+    );
+  }
+  if (refOrPath > 1) {
+    throw new FirebaseError(
+      `Multiple definitions for extension ${id}. Do not specify both reference and local path.`,
+    );
+  }
+}
+
+function parseExtensionForBuild(ex: WireExtension): build.DynamicExtension {
+  const parsed: build.DynamicExtension = {
+    params: {},
+    events: [],
+  };
+  if (ex.localPath) {
+    parsed.localPath = ex.localPath;
+  } else {
+    parsed.ref = ex.ref;
+  }
+  copyIfPresent(parsed, ex, "params", "events");
+
   return parsed;
 }
 

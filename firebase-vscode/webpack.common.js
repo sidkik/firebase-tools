@@ -13,7 +13,6 @@ const ForkTsCheckerWebpackPlugin = require("fork-ts-checker-webpack-plugin");
 const extensionConfig = {
   name: "extension",
   target: "node", // vscode extensions run in webworker context for VS Code web 📖 -> https://webpack.js.org/configuration/target/#target
-
   entry: {
     extension: "./src/extension.ts",
     server: {
@@ -73,10 +72,8 @@ const extensionConfig = {
     // support reading TypeScript and JavaScript files, 📖 -> https://github.com/TypeStrong/ts-loader
     // mainFields: ['browser', 'module', 'main'], // look for `browser` entry point in imported node modules
     mainFields: ["main", "module"],
-    extensions: [".ts", ".js"],
+    extensions: [".ts", ".js", ".json"], // needed to handle a node_module dependency emojilib, which requires json without ext.
     alias: {
-      // provides alternate implementation for node module and source files
-      "marked-terminal": path.resolve(__dirname, "src/stubs/empty-class.js"),
       // "ora": path.resolve(__dirname, 'src/stubs/empty-function.js'),
       commander: path.resolve(__dirname, "src/stubs/empty-class.js"),
       inquirer: path.resolve(__dirname, "src/stubs/inquirer-stub.js"),
@@ -87,7 +84,6 @@ const extensionConfig = {
       // This is used for Github deploy to hosting - will need to restore
       // or find another solution if we add that feature.
       "libsodium-wrappers": path.resolve(__dirname, "src/stubs/empty-class.js"),
-      marked: path.resolve(__dirname, "src/stubs/marked.js"),
     },
     fallback: {
       // Webpack 5 no longer polyfills Node.js core modules automatically.
@@ -111,12 +107,6 @@ const extensionConfig = {
         loader: "string-replace-loader",
         options: {
           multiple: [
-            // CLI code has absolute path to templates/. We copy templates/
-            // into dist, and this is the correct path now.
-            {
-              search: /(\.|\.\.)[\.\/]+templates/g,
-              replace: "./templates",
-            },
             // CLI code has absolute path to schema/. We copy schema/
             // into dist, and this is the correct path now.
             {
@@ -139,12 +129,14 @@ const extensionConfig = {
             // a temporary fix.
             {
               search: /module\.exports\.([a-zA-Z0-9]+)\(/g,
+              /** @param match {any} */
               replace: (match) => match.replace("module.exports.", ""),
             },
             // cloudtasks.ts type casts so there's an " as [type]" before the
             // starting paren to call the function
             {
               search: /module\.exports\.([a-zA-Z0-9]+) as/g,
+              /** @param match {any} */
               replace: (match) => match.replace("module.exports.", ""),
             },
             // Disallow starting . to ensure it doesn't conflict with
@@ -153,6 +145,7 @@ const extensionConfig = {
             // such as "exports.something = value"
             {
               search: /[^\.]exports\.([a-zA-Z0-9]+)\(/g,
+              /** @param match {any} */
               replace: (match) => match.replace("exports.", ""),
             },
           ],
@@ -198,19 +191,20 @@ const extensionConfig = {
           from: "../schema",
           to: "./schema",
         },
+        // TODO(hlshen): Sanity check if these should be fixed or removed. AFIACT, they exist for functions and hosting deploys, which are not relevant anymore.
         // Copy uncompiled JS files called at runtime by
         // firebase-tools/src/parseTriggers.ts
-        {
-          from: "*.js",
-          to: "./",
-          context: "../src/deploy/functions/runtimes/node",
-        },
-        // Copy cross-env-shell.js used to run predeploy scripts
-        // to ensure they work in Windows
-        {
-          from: "../node_modules/cross-env/dist",
-          to: "./cross-env/dist",
-        },
+        // {
+        //   from: "*.js",
+        //   to: "./",
+        //   context: "../src/deploy/functions/runtimes/node",
+        // },
+        // // Copy cross-env-shell.js used to run predeploy scripts
+        // // to ensure they work in Windows
+        // {
+        //   from: "../node_modules/cross-env/dist",
+        //   to: "./cross-env/dist",
+        // },
       ],
     }),
   ],
@@ -219,11 +213,12 @@ const extensionConfig = {
   },
 };
 
-function makeWebConfig(entryName) {
+/** @param entryName {any} */
+function makeWebConfig(entryName, entryPath = "") {
   return {
     name: entryName,
     mode: "none", // this leaves the source code as close as possible to the original (when packaging we set this to 'production')
-    entry: `./webviews/${entryName}.entry.tsx`,
+    entry: "./" + path.join("webviews", entryPath, `${entryName}.entry.tsx`),
     output: {
       // the bundle is stored in the 'dist' folder (check package.json), 📖 -> https://webpack.js.org/configuration/output/
       path: path.resolve(__dirname, "dist"),
@@ -290,6 +285,7 @@ function makeWebConfig(entryName) {
 // files to be generated. See:
 // https://github.com/TeamSupercell/typings-for-css-modules-loader#typescript-does-not-find-the-typings
 class WaitForCssTypescriptPlugin {
+  /** @param compiler {any} */
   apply(compiler) {
     const hooks = ForkTsCheckerWebpackPlugin.getCompilerHooks(compiler);
 
@@ -300,13 +296,23 @@ class WaitForCssTypescriptPlugin {
   }
 }
 
+/** Each folder in webviews needs to generate their webconfigs independently */
+const baseWebviews = fs
+  .readdirSync("webviews")
+  .filter((filename) => filename.match(/\.entry\.tsx/))
+  .map((filename) => filename.replace(/\.entry\.tsx/, ""))
+  .map((name) => makeWebConfig(name));
+
+const dataConnectWebviews = fs
+  .readdirSync("webviews/data-connect")
+  .filter((filename) => filename.match(/\.entry\.tsx/))
+  .map((filename) => filename.replace(/\.entry\.tsx/, ""))
+  .map((name) => makeWebConfig(name, "data-connect" /** entryPath */));
+
 module.exports = [
   // web extensions is disabled for now.
   // webExtensionConfig,
   extensionConfig,
-  ...fs
-    .readdirSync("webviews")
-    .filter((filename) => filename.match(/\.entry\.tsx/))
-    .map((filename) => filename.replace(/\.entry\.tsx/, ""))
-    .map((name) => makeWebConfig(name)),
+  ...baseWebviews,
+  ...dataConnectWebviews,
 ];

@@ -85,7 +85,7 @@ async function checkProducts(projectId: string, usedProducts: DeferredProduct[])
         "without server-side code.\n";
       errorMessage += `   https://console.firebase.google.com/project/${projectId}/authentication/users`;
     }
-    throw new FirebaseError(marked(errorMessage), { exit: 2 });
+    throw new FirebaseError(await marked(errorMessage), { exit: 2 });
   }
 }
 
@@ -130,7 +130,7 @@ async function isStorageProvisioned(projectId: string): Promise<boolean> {
     // Bucket resource name looks like: projects/PROJECT_NUMBER/buckets/BUCKET_NAME
     // and we just need the BUCKET_NAME part.
     const bucketResourceNameTokens = bucketResourceName.split("/");
-    const pattern = "^" + projectId + "(.[[a-z0-9]+)*.appspot.com$";
+    const pattern = "^" + projectId + "(.[[a-z0-9]+)*.(appspot.com|firebasestorage.app)$";
     return new RegExp(pattern).test(bucketResourceNameTokens[bucketResourceNameTokens.length - 1]);
   });
 }

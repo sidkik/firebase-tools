@@ -1,5 +1,4 @@
 import * as clc from "colorette";
-import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 
@@ -8,27 +7,33 @@ import { Config } from "../config";
 import { getAllAccounts } from "../auth";
 import { init, Setup } from "../init";
 import { logger } from "../logger";
-import { prompt, promptOnce } from "../prompt";
+import { checkbox, confirm } from "../prompt";
 import { requireAuth } from "../requireAuth";
 import * as fsutils from "../fsutils";
 import * as utils from "../utils";
 import { Options } from "../options";
 import { isEnabled } from "../experiments";
+import { readTemplateSync } from "../templates";
+import { FirebaseError } from "../error";
 
 const homeDir = os.homedir();
 
-const TEMPLATE_ROOT = path.resolve(__dirname, "../../templates/");
-const BANNER_TEXT = fs.readFileSync(path.join(TEMPLATE_ROOT, "banner.txt"), "utf8");
-const GITIGNORE_TEMPLATE = fs.readFileSync(path.join(TEMPLATE_ROOT, "_gitignore"), "utf8");
+const BANNER_TEXT = readTemplateSync("banner.txt");
+const GITIGNORE_TEMPLATE = readTemplateSync("_gitignore");
 
 function isOutside(from: string, to: string): boolean {
   return !!/^\.\./.exec(path.relative(from, to));
 }
 
-const choices = [
+let choices: {
+  value: string;
+  name: string;
+  checked: boolean;
+  hidden?: boolean;
+}[] = [
   {
-    value: "database",
-    name: "Realtime Database: Configure a security rules file for Realtime Database and (optionally) provision default instance",
+    value: "dataconnect",
+    name: "Data Connect: Set up a Firebase Data Connect service",
     checked: false,
   },
   {
@@ -42,13 +47,14 @@ const choices = [
     checked: false,
   },
   {
-    value: "hosting",
-    name: "Hosting: Configure files for Firebase Hosting and (optionally) set up GitHub Action deploys",
+    value: "apphosting",
+    name: "App Hosting: Enable web app deployments with App Hosting",
     checked: false,
+    hidden: false,
   },
   {
-    value: "hosting:github",
-    name: "Hosting: Set up GitHub Action deploys",
+    value: "hosting",
+    name: "Hosting: Configure files for Firebase Hosting and (optionally) set up GitHub Action deploys",
     checked: false,
   },
   {
@@ -71,27 +77,40 @@ const choices = [
     name: "Extensions: Set up an empty Extensions manifest",
     checked: false,
   },
+  {
+    value: "database",
+    name: "Realtime Database: Configure a security rules file for Realtime Database and (optionally) provision default instance",
+    checked: false,
+  },
+  {
+    value: "hosting:github",
+    name: "Hosting: Set up GitHub Action deploys",
+    checked: false,
+    hidden: true,
+  },
+  {
+    value: "dataconnect:sdk",
+    name: "Data Connect: Set up a generated SDK for your Firebase Data Connect service",
+    checked: false,
+    hidden: true,
+  },
 ];
 
 if (isEnabled("genkit")) {
-  choices.push({
-    value: "genkit",
-    name: "Genkit: Setup a new Genkit project with Firebase",
-    checked: false,
-  });
-}
-
-if (isEnabled("dataconnect")) {
-  choices.push({
-    value: "dataconnect",
-    name: "Data Connect: Set up a Firebase Data Connect service.",
-    checked: false,
-  });
+  choices = [
+    ...choices.slice(0, 2),
+    {
+      value: "genkit",
+      name: "Genkit: Setup a new Genkit project with Firebase",
+      checked: false,
+    },
+    ...choices.slice(2),
+  ];
 }
 
 const featureNames = choices.map((choice) => choice.value);
 
-const DESCRIPTION = `Interactively configure the current directory as a Firebase project or initialize new features in an already configured Firebase project directory.
+const HELP = `Interactively configure the current directory as a Firebase project or initialize new features in an already configured Firebase project directory.
 
 This command will create or update 'firebase.json' and '.firebaserc' configuration files in the current directory.
 
@@ -102,7 +121,8 @@ ${[...featureNames]
   .join("")}`;
 
 export const command = new Command("init [feature]")
-  .description(DESCRIPTION)
+  .description("interactively configure the current directory as a Firebase project directory")
+  .help(HELP)
   .before(requireAuth)
   .action(initAction);
 
@@ -111,7 +131,7 @@ export const command = new Command("init [feature]")
  * @param feature Feature to init (e.g., hosting, functions)
  * @param options Command options
  */
-export function initAction(feature: string, options: Options): Promise<void> {
+export async function initAction(feature: string, options: Options): Promise<void> {
   if (feature && !featureNames.includes(feature)) {
     return utils.reject(
       clc.bold(feature) +
@@ -164,77 +184,60 @@ export function initAction(feature: string, options: Options): Promise<void> {
     }),
   };
 
-  let next;
   // HACK: Windows Node has issues with selectables as the first prompt, so we
   // add an extra confirmation prompt that fixes the problem
+  // TODO: see if this issue still persists in the new prompt library.
   if (process.platform === "win32") {
-    next = promptOnce({
-      type: "confirm",
-      message: "Are you ready to proceed?",
-    });
-  } else {
-    next = Promise.resolve(true);
+    if (!(await confirm("Are you ready to proceed?"))) {
+      throw new FirebaseError("Aborted by user.", { exit: 1 });
+    }
   }
 
-  return next
-    .then((proceed) => {
-      if (!proceed) {
-        return utils.reject("Aborted by user.", { exit: 1 });
-      }
-
-      if (feature) {
-        setup.featureArg = true;
-        setup.features = [feature];
-        return undefined;
-      }
-      return prompt(setup, [
-        {
-          type: "checkbox",
-          name: "features",
-          message:
-            "Which Firebase features do you want to set up for this directory? " +
-            "Press Space to select features, then Enter to confirm your choices.",
-          choices: choices,
-        },
-      ]);
-    })
-    .then(() => {
-      if (!setup.features || setup.features?.length === 0) {
-        return utils.reject(
-          "Must select at least one feature. Use " +
-            clc.bold(clc.underline("SPACEBAR")) +
-            " to select features, or specify a feature by running " +
-            clc.bold("firebase init [feature_name]"),
-        );
-      }
-
-      // Always set up project
-      setup.features.unshift("project");
-
-      // If there is more than one account, add an account choice phase
-      const allAccounts = getAllAccounts();
-      if (allAccounts.length > 1) {
-        setup.features.unshift("account");
-      }
-
-      // "hosting:github" is a part of "hosting", so if both are selected, "hosting:github" is ignored.
-      if (setup.features.includes("hosting") && setup.features.includes("hosting:github")) {
-        setup.features = setup.features.filter((f) => f !== "hosting:github");
-      }
-
-      return init(setup, config, options);
-    })
-    .then(() => {
-      logger.info();
-      utils.logBullet("Writing configuration info to " + clc.bold("firebase.json") + "...");
-      config.writeProjectFile("firebase.json", setup.config);
-      utils.logBullet("Writing project information to " + clc.bold(".firebaserc") + "...");
-      config.writeProjectFile(".firebaserc", setup.rcfile);
-      if (!fsutils.fileExistsSync(config.path(".gitignore"))) {
-        utils.logBullet("Writing gitignore file to " + clc.bold(".gitignore") + "...");
-        config.writeProjectFile(".gitignore", GITIGNORE_TEMPLATE);
-      }
-      logger.info();
-      utils.logSuccess("Firebase initialization complete!");
+  if (feature) {
+    setup.featureArg = true;
+    setup.features = [feature];
+  } else {
+    setup.features = await checkbox<string>({
+      message:
+        "Which Firebase features do you want to set up for this directory? " +
+        "Press Space to select features, then Enter to confirm your choices.",
+      choices: choices.filter((c) => !c.hidden),
     });
+  }
+  if (!setup.features || setup.features?.length === 0) {
+    throw new FirebaseError(
+      "Must select at least one feature. Use " +
+        clc.bold(clc.underline("SPACEBAR")) +
+        " to select features, or specify a feature by running " +
+        clc.bold("firebase init [feature_name]"),
+    );
+  }
+
+  // Always set up project
+  setup.features.unshift("project");
+
+  // If there is more than one account, add an account choice phase
+  const allAccounts = getAllAccounts();
+  if (allAccounts.length > 1) {
+    setup.features.unshift("account");
+  }
+
+  // "hosting:github" is a part of "hosting", so if both are selected, "hosting:github" is ignored.
+  if (setup.features.includes("hosting") && setup.features.includes("hosting:github")) {
+    setup.features = setup.features.filter((f) => f !== "hosting:github");
+  }
+
+  await init(setup, config, options);
+
+  logger.info();
+  utils.logBullet("Writing configuration info to " + clc.bold("firebase.json") + "...");
+  config.writeProjectFile("firebase.json", setup.config);
+  utils.logBullet("Writing project information to " + clc.bold(".firebaserc") + "...");
+  config.writeProjectFile(".firebaserc", setup.rcfile);
+  if (!fsutils.fileExistsSync(config.path(".gitignore"))) {
+    utils.logBullet("Writing gitignore file to " + clc.bold(".gitignore") + "...");
+    config.writeProjectFile(".gitignore", GITIGNORE_TEMPLATE);
+  }
+  logger.info();
+  utils.logSuccess("Firebase initialization complete!");
 }

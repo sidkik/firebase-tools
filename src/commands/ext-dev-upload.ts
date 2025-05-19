@@ -1,6 +1,6 @@
 import * as clc from "colorette";
 import { marked } from "marked";
-import * as TerminalRenderer from "marked-terminal";
+import { markedTerminal } from "marked-terminal";
 
 import { Command } from "../command";
 import {
@@ -16,17 +16,16 @@ import { findExtensionYaml } from "../extensions/localHelper";
 import { consoleInstallLink } from "../extensions/publishHelpers";
 import { ExtensionVersion, PublisherProfile } from "../extensions/types";
 import { requireAuth } from "../requireAuth";
-import { FirebaseError } from "../error";
+import { FirebaseError, getErrStatus } from "../error";
 import { acceptLatestPublisherTOS } from "../extensions/tos";
 import * as utils from "../utils";
 import { Options } from "../options";
 import { getPublisherProfile } from "../extensions/publisherApi";
 import { getPublisherProjectFromName } from "../extensions/extensionsHelper";
-import { getFirebaseProject } from "../management/projects";
+import { getProject } from "../management/projects";
 
-marked.setOptions({
-  renderer: new TerminalRenderer(),
-});
+// TODO(joehan): Go update @types/marked-terminal
+marked.use(markedTerminal() as any);
 
 /**
  * Command for publishing an extension version.
@@ -81,14 +80,14 @@ export async function uploadExtensionAction(
   let profile: PublisherProfile | undefined;
   try {
     profile = await getPublisherProfile("-", publisherId);
-  } catch (err: any) {
-    if (err.status === 404) {
+  } catch (err: unknown) {
+    if (getErrStatus(err) === 404) {
       throw getMissingPublisherError(publisherId);
     }
     throw err;
   }
   const projectNumber = `${getPublisherProjectFromName(profile.name)}`;
-  const { projectId } = await getFirebaseProject(projectNumber);
+  const { projectId } = await getProject(projectNumber);
   await acceptLatestPublisherTOS(options, projectNumber);
 
   let res;
@@ -115,11 +114,14 @@ export async function uploadExtensionAction(
     });
   }
   if (res) {
-    utils.logLabeledBullet(logPrefix, marked(`[Install Link](${consoleInstallLink(res.ref)})`));
+    utils.logLabeledBullet(
+      logPrefix,
+      await marked(`[Install Link](${consoleInstallLink(res.ref)})`),
+    );
     const version = res.ref.split("@")[1];
     utils.logLabeledBullet(
       logPrefix,
-      marked(
+      await marked(
         `[View in Console](${utils.consoleUrl(
           projectId,
           `/publisher/extensions/${extensionId}/v/${version}`,

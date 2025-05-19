@@ -2,13 +2,14 @@ import * as clc from "colorette";
 import * as ora from "ora";
 
 import { Client } from "../apiv2";
-import { FirebaseError } from "../error";
+import { FirebaseError, getErrStatus } from "../error";
 import { pollOperation } from "../operation-poller";
-import { Question, promptOnce } from "../prompt";
+import * as prompt from "../prompt";
 import * as api from "../api";
 import { logger } from "../logger";
 import * as utils from "../utils";
 import { FirebaseProjectMetadata, CloudProjectInfo, ProjectPage } from "../types/project";
+import { bestEffortEnsure } from "../ensureApiEnabled";
 
 const TIMEOUT_MILLIS = 30000;
 const MAXIMUM_PROMPT_LIST = 100;
@@ -25,22 +26,41 @@ export interface ProjectParentResource {
   type: ProjectParentResourceType;
 }
 
-export const PROJECTS_CREATE_QUESTIONS: Question[] = [
-  {
-    type: "input",
-    name: "projectId",
-    default: "",
+/**
+ * Prompt user to create a new project
+ */
+export async function promptProjectCreation(): Promise<{ projectId: string; displayName: string }> {
+  const projectId = await prompt.input({
     message:
       "Please specify a unique project id " +
       `(${clc.yellow("warning")}: cannot be modified afterward) [6-30 characters]:\n`,
-  },
-  {
-    type: "input",
-    name: "displayName",
-    default: "",
+    validate: (projectId: string) => {
+      if (projectId.length < 6) {
+        return "Project ID must be at least 6 characters long";
+      } else if (projectId.length > 30) {
+        return "Project ID cannot be longer than 30 characters";
+      } else {
+        return true;
+      }
+    },
+  });
+
+  const displayName = await prompt.input({
+    default: projectId,
     message: "What would you like to call your project? (defaults to your project ID)",
-  },
-];
+    validate: (displayName: string) => {
+      if (displayName.length < 4) {
+        return "Project name must be at least 4 characters long";
+      } else if (displayName.length > 30) {
+        return "Project name cannot be longer than 30 characters";
+      } else {
+        return true;
+      }
+    },
+  });
+
+  return { projectId, displayName };
+}
 
 const firebaseAPIClient = new Client({
   urlPrefix: api.firebaseApiOrigin(),
@@ -48,6 +68,14 @@ const firebaseAPIClient = new Client({
   apiVersion: "v1beta1",
 });
 
+const resourceManagerClient = new Client({
+  urlPrefix: api.resourceManagerOrigin(),
+  apiVersion: "v1",
+});
+
+/**
+ * Create a new Google Cloud Platform project and add Firebase resources to it
+ */
 export async function createFirebaseProjectAndLog(
   projectId: string,
   options: { displayName?: string; parentResource?: ProjectParentResource },
@@ -65,6 +93,9 @@ export async function createFirebaseProjectAndLog(
   return addFirebaseToCloudProjectAndLog(projectId);
 }
 
+/**
+ * Add Firebase resources to a Google Cloud Platform project
+ */
 export async function addFirebaseToCloudProjectAndLog(
   projectId: string,
 ): Promise<FirebaseProjectMetadata> {
@@ -93,7 +124,9 @@ function logNewFirebaseProjectInfo(projectInfo: FirebaseProjectMetadata): void {
   logger.info("");
   logger.info("Project information:");
   logger.info(`   - Project ID: ${clc.bold(projectInfo.projectId)}`);
-  logger.info(`   - Project Name: ${clc.bold(projectInfo.displayName)}`);
+  if (projectInfo.displayName) {
+    logger.info(`   - Project Name: ${clc.bold(projectInfo.displayName)}`);
+  }
   logger.info("");
   logger.info("Firebase console is available at");
   logger.info(
@@ -127,10 +160,7 @@ async function selectProjectInteractively(
 }
 
 async function selectProjectByPrompting(): Promise<FirebaseProjectMetadata> {
-  const projectId = await promptOnce({
-    type: "input",
-    message: "Please input the project ID you would like to use:",
-  });
+  const projectId = await prompt.input("Please input the project ID you would like to use:");
 
   return await getFirebaseProject(projectId);
 }
@@ -159,9 +189,7 @@ async function selectProjectFromList(
         )}.\n`,
     );
   }
-  const projectId: string = await promptOnce({
-    type: "list",
-    name: "id",
+  const projectId: string = await prompt.select<string>({
     message: "Select a default Firebase project for this directory:",
     choices,
   });
@@ -196,10 +224,9 @@ export async function promptAvailableProjectId(): Promise<string> {
 
   if (nextPageToken) {
     // Prompt for project ID if we can't list all projects in 1 page
-    return await promptOnce({
-      type: "input",
-      message: "Please input the ID of the Google Cloud Project you would like to add Firebase:",
-    });
+    return await prompt.input(
+      "Please input the ID of the Google Cloud Project you would like to add Firebase:",
+    );
   } else {
     const choices = projects
       .filter((p: CloudProjectInfo) => !!p)
@@ -211,9 +238,7 @@ export async function promptAvailableProjectId(): Promise<string> {
         };
       })
       .sort((a, b) => a.name.localeCompare(b.name));
-    return await promptOnce({
-      type: "list",
-      name: "id",
+    return await prompt.select<string>({
       message: "Select the Google Cloud Platform project you would like to add Firebase:",
       choices,
     });
@@ -230,13 +255,12 @@ export async function createCloudProject(
   options: { displayName?: string; parentResource?: ProjectParentResource },
 ): Promise<any> {
   try {
-    const client = new Client({ urlPrefix: api.resourceManagerOrigin(), apiVersion: "v1" });
     const data = {
       projectId,
       name: options.displayName || projectId,
       parent: options.parentResource,
     };
-    const response = await client.request<any, { name: string }>({
+    const response = await resourceManagerClient.request<any, { name: string }>({
       method: "POST",
       path: "/projects",
       body: data,
@@ -411,6 +435,22 @@ export async function getFirebaseProject(projectId: string): Promise<FirebasePro
     });
     return res.body;
   } catch (err: any) {
+    if (getErrStatus(err) === 404) {
+      try {
+        logger.debug(
+          `Couldn't get project info from firedata for ${projectId}, trying resource manager. Original error: ${err}`,
+        );
+        const info = await getProject(projectId);
+        // TODO: Update copy based on Rachel/Yvonne's feedback.
+        // TODO: Add link
+        // logger.info(`Project ${clc.bold(projectId)} is not a Firebase project.`);
+        // logger.info('It can only use products governed by the Google Cloud Platform terms of service.');
+        // logger.info('If you wish to use products governed by the Firebase terms of service, upgrade to a Firebase project <link here>');
+        return info;
+      } catch (err: any) {
+        logger.debug(`Unable to get project info from resourcemanager for ${projectId}: ${err}`);
+      }
+    }
     let message = err.message;
     if (err.original) {
       message += ` (original: ${err.original.message})`;
@@ -418,6 +458,58 @@ export async function getFirebaseProject(projectId: string): Promise<FirebasePro
     logger.debug(message);
     throw new FirebaseError(
       `Failed to get Firebase project ${projectId}. ` +
+        "Please make sure the project exists and your account has permission to access it.",
+      { exit: 2, original: err },
+    );
+  }
+}
+
+export interface ProjectInfo {
+  projectNumber: string;
+  projectId: string;
+  lifecycleState: string;
+  name: string;
+  createTime: string;
+  parent: { type: string; id: string };
+}
+
+/**
+ * Gets basic information about any Cloud project. Does not use Firebase TOS APIs, so this is safe for core app projects.
+ * @param projectId
+ */
+export async function getProject(projectId: string): Promise<ProjectInfo> {
+  await bestEffortEnsure(projectId, api.resourceManagerOrigin(), "firebase", true);
+  const response = await resourceManagerClient.get<ProjectInfo>(`/projects/${projectId}`);
+  return response.body;
+}
+
+/**
+ * Checks if Firebase services are enabled for a Google Cloud Platform project.
+ * @param projectId The project ID to check
+ * @return A promise that resolves to the Firebase project metadata if enabled, undefined otherwise
+ */
+export async function checkFirebaseEnabledForCloudProject(
+  projectId: string,
+): Promise<FirebaseProjectMetadata | undefined> {
+  try {
+    const res = await firebaseAPIClient.request<void, FirebaseProjectMetadata>({
+      method: "GET",
+      path: `/projects/${projectId}`,
+      timeout: TIMEOUT_MILLIS,
+    });
+    return res.body;
+  } catch (err: any) {
+    if (getErrStatus(err) === 404) {
+      // 404 means Firebase is not enabled for this project
+      return undefined;
+    }
+    let message = err.message;
+    if (err.original) {
+      message += ` (original: ${err.original.message})`;
+    }
+    logger.debug(message);
+    throw new FirebaseError(
+      `Failed to check if Firebase is enabled for project ${projectId}. ` +
         "Please make sure the project exists and your account has permission to access it.",
       { exit: 2, original: err },
     );

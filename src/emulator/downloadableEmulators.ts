@@ -1,3 +1,4 @@
+const lsofi = require("lsofi");
 import {
   Emulators,
   DownloadableEmulators,
@@ -8,7 +9,7 @@ import {
 } from "./types";
 import { Constants } from "./constants";
 
-import { FirebaseError } from "../error";
+import { FirebaseError, hasMessage } from "../error";
 import * as childProcess from "child_process";
 import * as utils from "../utils";
 import { EmulatorLogger } from "./emulatorLogger";
@@ -20,60 +21,39 @@ import * as os from "os";
 import { EmulatorRegistry } from "./registry";
 import { downloadEmulator } from "../emulator/download";
 import * as experiments from "../experiments";
+import * as process from "process";
+import * as emulatorUpdateDetails from "./downloadableEmulatorInfo.json";
 
 const EMULATOR_INSTANCE_KILL_TIMEOUT = 4000; /* ms */
 
 const CACHE_DIR =
   process.env.FIREBASE_EMULATORS_PATH || path.join(os.homedir(), ".cache", "firebase", "emulators");
 
-const EMULATOR_UPDATE_DETAILS: { [s in DownloadableEmulators]: EmulatorUpdateDetails } = {
-  database: {
-    version: "4.11.2",
-    expectedSize: 34495935,
-    expectedChecksum: "2fd771101c0e1f7898c04c9204f2ce63",
-  },
-  firestore: {
-    version: "1.19.7",
-    expectedSize: 66438992,
-    expectedChecksum: "aec233bea95c5cfab03881574ec16d6c",
-  },
-  storage: {
-    version: "1.1.3",
-    expectedSize: 52892936,
-    expectedChecksum: "2ca11ec1193003bea89f806cc085fa25",
-  },
-  ui: experiments.isEnabled("emulatoruisnapshot")
-    ? { version: "SNAPSHOT", expectedSize: -1, expectedChecksum: "" }
-    : {
-        version: "1.12.1",
-        expectedSize: 3498269,
-        expectedChecksum: "a7f4398a00e5ca22abdcd78dc3877d00",
-      },
-  pubsub: {
-    version: "0.8.14",
-    expectedSize: 66786933,
-    expectedChecksum: "a9025b3e53fdeafd2969ccb3ba1e1d38",
-  },
-  dataconnect:
-    process.platform === "darwin"
-      ? {
-          version: "1.2.0",
-          expectedSize: 23954240,
-          expectedChecksum: "0f250761959519bb5a28fed76ceab2cb",
-        }
-      : process.platform === "win32"
-        ? {
-            version: "1.2.0",
-            expectedSize: 24360960,
-            expectedChecksum: "168ce32c742e1d26037c52bdbb7d871c",
-          }
-        : {
-            version: "1.2.0",
-            expectedSize: 23970052,
-            expectedChecksum: "2ca17e4009a9ebae0f7c983bafff2ee6",
-          },
-};
+const EMULATOR_UPDATE_DETAILS: {
+  database: EmulatorUpdateDetails;
+  firestore: EmulatorUpdateDetails;
+  storage: EmulatorUpdateDetails;
+  pubsub: EmulatorUpdateDetails;
+  ui: {
+    main: EmulatorUpdateDetails;
+    snapshot: EmulatorUpdateDetails;
+  };
+  dataconnect: {
+    darwin: EmulatorUpdateDetails;
+    win32: EmulatorUpdateDetails;
+    linux: EmulatorUpdateDetails;
+  };
+} = emulatorUpdateDetails;
 
+const emulatorUiDetails = experiments.isEnabled("emulatoruisnapshot")
+  ? EMULATOR_UPDATE_DETAILS.ui.snapshot
+  : EMULATOR_UPDATE_DETAILS.ui.main;
+const dataconnectDetails =
+  process.platform === "darwin"
+    ? EMULATOR_UPDATE_DETAILS.dataconnect.darwin
+    : process.platform === "win32"
+      ? EMULATOR_UPDATE_DETAILS.dataconnect.win32
+      : EMULATOR_UPDATE_DETAILS.dataconnect.linux;
 export const DownloadDetails: { [s in DownloadableEmulators]: EmulatorDownloadDetails } = {
   database: {
     downloadPath: path.join(
@@ -118,20 +98,15 @@ export const DownloadDetails: { [s in DownloadableEmulators]: EmulatorDownloadDe
     },
   },
   ui: {
-    version: EMULATOR_UPDATE_DETAILS.ui.version,
-    downloadPath: path.join(CACHE_DIR, `ui-v${EMULATOR_UPDATE_DETAILS.ui.version}.zip`),
-    unzipDir: path.join(CACHE_DIR, `ui-v${EMULATOR_UPDATE_DETAILS.ui.version}`),
-    binaryPath: path.join(
-      CACHE_DIR,
-      `ui-v${EMULATOR_UPDATE_DETAILS.ui.version}`,
-      "server",
-      "server.mjs",
-    ),
+    version: emulatorUiDetails.version,
+    downloadPath: path.join(CACHE_DIR, `ui-v${emulatorUiDetails.version}.zip`),
+    unzipDir: path.join(CACHE_DIR, `ui-v${emulatorUiDetails.version}`),
+    binaryPath: path.join(CACHE_DIR, `ui-v${emulatorUiDetails.version}`, "server", "server.mjs"),
     opts: {
       cacheDir: CACHE_DIR,
-      remoteUrl: `https://storage.googleapis.com/firebase-preview-drop/emulator/ui-v${EMULATOR_UPDATE_DETAILS.ui.version}.zip`,
-      expectedSize: EMULATOR_UPDATE_DETAILS.ui.expectedSize,
-      expectedChecksum: EMULATOR_UPDATE_DETAILS.ui.expectedChecksum,
+      remoteUrl: `https://storage.googleapis.com/firebase-preview-drop/emulator/ui-v${emulatorUiDetails.version}.zip`,
+      expectedSize: emulatorUiDetails.expectedSize,
+      expectedChecksum: emulatorUiDetails.expectedChecksum,
       skipCache: experiments.isEnabled("emulatoruisnapshot"),
       skipChecksumAndSize: experiments.isEnabled("emulatoruisnapshot"),
       namePrefix: "ui",
@@ -157,30 +132,29 @@ export const DownloadDetails: { [s in DownloadableEmulators]: EmulatorDownloadDe
       namePrefix: "pubsub-emulator",
     },
   },
-  // TODO: Add Windows binary here as well
   dataconnect: {
     downloadPath: path.join(
       CACHE_DIR,
-      `dataconnect-emulator-${EMULATOR_UPDATE_DETAILS.dataconnect.version}${process.platform === "win32" ? ".exe" : ""}`,
+      `dataconnect-emulator-${dataconnectDetails.version}${process.platform === "win32" ? ".exe" : ""}`,
     ),
-    version: EMULATOR_UPDATE_DETAILS.dataconnect.version,
+    version: dataconnectDetails.version,
     binaryPath: path.join(
       CACHE_DIR,
-      `dataconnect-emulator-${EMULATOR_UPDATE_DETAILS.dataconnect.version}${process.platform === "win32" ? ".exe" : ""}`,
+      `dataconnect-emulator-${dataconnectDetails.version}${process.platform === "win32" ? ".exe" : ""}`,
     ),
     opts: {
       cacheDir: CACHE_DIR,
       remoteUrl:
         process.platform === "darwin"
-          ? `https://storage.googleapis.com/firemat-preview-drop/emulator/dataconnect-emulator-macos-v${EMULATOR_UPDATE_DETAILS.dataconnect.version}`
+          ? `https://storage.googleapis.com/firemat-preview-drop/emulator/dataconnect-emulator-macos-v${dataconnectDetails.version}`
           : process.platform === "win32"
-            ? `https://storage.googleapis.com/firemat-preview-drop/emulator/dataconnect-emulator-windows-v${EMULATOR_UPDATE_DETAILS.dataconnect.version}`
-            : `https://storage.googleapis.com/firemat-preview-drop/emulator/dataconnect-emulator-linux-v${EMULATOR_UPDATE_DETAILS.dataconnect.version}`,
-      expectedSize: EMULATOR_UPDATE_DETAILS.dataconnect.expectedSize,
-      expectedChecksum: EMULATOR_UPDATE_DETAILS.dataconnect.expectedChecksum,
+            ? `https://storage.googleapis.com/firemat-preview-drop/emulator/dataconnect-emulator-windows-v${dataconnectDetails.version}`
+            : `https://storage.googleapis.com/firemat-preview-drop/emulator/dataconnect-emulator-linux-v${dataconnectDetails.version}`,
+      expectedSize: dataconnectDetails.expectedSize,
+      expectedChecksum: dataconnectDetails.expectedChecksum,
       skipChecksumAndSize: false,
       namePrefix: "dataconnect-emulator",
-      auth: true,
+      auth: false,
     },
   },
 };
@@ -273,31 +247,30 @@ const Commands: { [s in DownloadableEmulators]: DownloadableEmulatorCommand } = 
     shell: false,
   },
   pubsub: {
-    binary: getExecPath(Emulators.PUBSUB)!,
+    binary: `${getExecPath(Emulators.PUBSUB)!}`,
     args: [],
     optionalArgs: ["port", "host"],
     joinArgs: true,
     shell: true,
   },
   ui: {
-    binary: "node",
-    args: [getExecPath(Emulators.UI)],
+    binary: "",
+    args: [],
     optionalArgs: [],
     joinArgs: false,
     shell: false,
   },
   dataconnect: {
-    binary: getExecPath(Emulators.DATACONNECT),
-    args: ["dev"],
+    binary: `${getExecPath(Emulators.DATACONNECT)}`,
+    args: ["--logtostderr", "-v=2", "dev"],
     optionalArgs: [
       "listen",
       "config_dir",
-      "project_id",
-      "service_location",
-      "disable_sdk_generation",
-      "resolvers_emulator",
-      "vertex_location",
-      "rpc_retry_count",
+      "enable_output_schema_extensions",
+      "enable_output_generated_sdk",
+      // Additional flags that CLI shouldn't pass:
+      // rpc_retry_count,
+      // resolvers_emulator,
     ],
     joinArgs: true,
     shell: false,
@@ -376,6 +349,7 @@ export function _getCommand(
     optionalArgs: baseCmd.optionalArgs,
     joinArgs: baseCmd.joinArgs,
     shell: baseCmd.shell,
+    port: args.port,
   };
 }
 
@@ -399,12 +373,24 @@ async function _fatal(emulator: Emulators, errorMsg: string): Promise<void> {
 /**
  * Handle errors in an emulator process.
  */
-export async function handleEmulatorProcessError(emulator: Emulators, err: any): Promise<void> {
+export async function handleEmulatorProcessError(
+  emulator: Emulators,
+  err: any,
+  port?: number,
+): Promise<void> {
   const description = Constants.description(emulator);
   if (err.path === "java" && err.code === "ENOENT") {
     await _fatal(
       emulator,
       `${description} has exited because java is not installed, you can install it from https://openjdk.java.net/install/`,
+    );
+  } else if (err.code === "EADDRINUSE") {
+    const ps = port ? await lsofi(port) : false;
+    await _fatal(
+      emulator,
+      `${description} has exited because its configured port is already in use${
+        ps ? ` by process number ${ps}` : ""
+      }. Are you running another copy of the emulator suite?`,
     );
   } else {
     await _fatal(emulator, `${description} has exited: ${err}`);
@@ -441,6 +427,9 @@ async function _runBinary(
       };
       if (command.shell && utils.IS_WINDOWS) {
         opts.shell = true;
+        if (command.binary.includes(" ")) {
+          command.binary = `"${command.binary}"`;
+        }
       }
       emulator.instance = childProcess.spawn(command.binary, command.args, opts);
     } catch (e: any) {
@@ -451,6 +440,14 @@ async function _runBinary(
           "WARN",
           emulator.name,
           `Could not spawn child process for emulator, check that java is installed and on your $PATH.`,
+        );
+      } else if (isIncomaptibleArchError(e)) {
+        logger.logLabeled(
+          "WARN",
+          emulator.name,
+          `Unknown system error when starting emulator binary. ` +
+            `You may be able to fix this by installing Rosetta: ` +
+            `softwareupdate --install-rosetta`,
         );
       }
       _fatal(emulator.name, e);
@@ -484,10 +481,15 @@ async function _runBinary(
           "Unsupported java version, make sure java --version reports 1.8 or higher.",
         );
       }
+
+      if (data.toString().includes("address already in use")) {
+        const message = `${description} has exited because its configured port ${command.port} is already in use. Are you running another copy of the emulator suite?`;
+        logger.logLabeled("ERROR", emulator.name, message);
+      }
     });
 
-    emulator.instance.on("error", (err) => {
-      handleEmulatorProcessError(emulator.name, err);
+    emulator.instance.on("error", (err: any) => {
+      void handleEmulatorProcessError(emulator.name, err, command.port);
     });
 
     emulator.instance.once("exit", async (code, signal) => {
@@ -623,4 +625,12 @@ export async function start(
     `Starting ${Constants.description(targetName)} with command ${JSON.stringify(command)}`,
   );
   return _runBinary(emulator, command, extraEnv);
+}
+
+export function isIncomaptibleArchError(err: unknown): boolean {
+  return (
+    hasMessage(err) &&
+    /Unknown system error/.test(err.message ?? "") &&
+    process.platform === "darwin"
+  );
 }

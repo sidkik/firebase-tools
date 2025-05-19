@@ -44,9 +44,16 @@ export const apphostingP4SADomain = () =>
     "FIREBASE_APPHOSTING_P4SA_DOMAIN",
     "gcp-sa-firebaseapphosting.iam.gserviceaccount.com",
   );
+export const apphostingGitHubAppInstallationURL = () =>
+  utils.envOverride(
+    "FIREBASE_APPHOSTING_GITHUB_INSTALLATION_URL",
+    "https://github.com/apps/firebase-app-hosting/installations/new",
+  );
 
 export const authOrigin = () =>
   utils.envOverride("FIREBASE_AUTH_URL", "https://accounts.google.com");
+export const authManagementOrigin = () =>
+  utils.envOverride("FIREBASE_AUTH_MANAGEMENT_URL", "https://identitytoolkit.googleapis.com");
 export const consoleOrigin = () =>
   utils.envOverride("FIREBASE_CONSOLE_URL", "https://console.firebase.google.com");
 export const dynamicLinksOrigin = () =>
@@ -84,7 +91,8 @@ export const functionsDefaultRegion = () =>
 
 export const cloudbuildOrigin = () =>
   utils.envOverride("FIREBASE_CLOUDBUILD_URL", "https://cloudbuild.googleapis.com");
-
+export const cloudCompanionOrigin = () =>
+  utils.envOverride("CLOUD_COMPANION_URL", "https://cloudaicompanion.googleapis.com");
 export const cloudschedulerOrigin = () =>
   utils.envOverride("FIREBASE_CLOUDSCHEDULER_URL", "https://cloudscheduler.googleapis.com");
 export const cloudTasksOrigin = () =>
@@ -117,6 +125,10 @@ export const rtdbMetadataOrigin = () =>
   utils.envOverride("FIREBASE_RTDB_METADATA_URL", "https://metadata-dot-firebase-prod.appspot.com");
 export const remoteConfigApiOrigin = () =>
   utils.envOverride("FIREBASE_REMOTE_CONFIG_URL", "https://firebaseremoteconfig.googleapis.com");
+export const messagingApiOrigin = () =>
+  utils.envOverride("FIREBASE_MESSAGING_CONFIG_URL", "https://fcm.googleapis.com");
+export const crashlyticsApiOrigin = () =>
+  utils.envOverride("FIREBASE_CRASHLYTICS_URL", "https://firebasecrashlytics.googleapis.com");
 export const resourceManagerOrigin = () =>
   utils.envOverride("FIREBASE_RESOURCEMANAGER_URL", "https://cloudresourcemanager.googleapis.com");
 export const rulesOrigin = () =>
@@ -146,12 +158,19 @@ export const githubClientSecret = () =>
 
 export const dataconnectOrigin = () =>
   utils.envOverride("FIREBASE_DATACONNECT_URL", "https://firebasedataconnect.googleapis.com");
+export const dataconnectP4SADomain = () =>
+  utils.envOverride(
+    "FIREBASE_DATACONNECT_P4SA_DOMAIN",
+    "gcp-sa-firebasedataconnect.iam.gserviceaccount.com",
+  );
 export const dataConnectLocalConnString = () =>
   utils.envOverride("FIREBASE_DATACONNECT_POSTGRESQL_STRING", "");
 export const cloudSQLAdminOrigin = () =>
   utils.envOverride("CLOUD_SQL_URL", "https://sqladmin.googleapis.com");
 export const vertexAIOrigin = () =>
   utils.envOverride("VERTEX_AI_URL", "https://aiplatform.googleapis.com");
+export const cloudAiCompanionOrigin = () =>
+  utils.envOverride("CLOUD_AI_COMPANION_URL", "https://cloudaicompanion.googleapis.com");
 
 /** Gets scopes that have been set. */
 export function getScopes(): string[] {

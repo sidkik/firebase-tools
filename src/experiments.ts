@@ -1,7 +1,6 @@
 import { bold, italic } from "colorette";
 import * as leven from "leven";
 import { basename } from "path";
-
 import { configstore } from "./configstore";
 import { FirebaseError } from "./error";
 import { isRunningInGithubAction } from "./init/features/hosting/github";
@@ -40,7 +39,7 @@ export const ALL_EXPERIMENTS = experiments({
       "of deploys. This has been made an experiment due to backend bugs that are " +
       "temporarily causing failures in some regions with this optimization enabled",
     public: true,
-    default: false,
+    default: true,
   },
   deletegcfartifacts: {
     shortDescription: `Add the ${bold(
@@ -59,24 +58,13 @@ export const ALL_EXPERIMENTS = experiments({
     public: true,
   },
 
-  // permanent experiment
-  automaticallydeletegcfartifacts: {
-    shortDescription: "Control whether functions cleans up images after deploys",
-    fullDescription:
-      "To control costs, Firebase defaults to automatically deleting containers " +
-      "created during the build process. This has the side-effect of preventing " +
-      "users from rolling back to previous revisions using the Run API. To change " +
-      `this behavior, call ${bold("experiments:disable deletegcfartifactsondeploy")} ` +
-      `consider also calling ${bold("experiments:enable deletegcfartifacts")} ` +
-      `to enable the new command ${bold("functions:deletegcfartifacts")} which` +
-      "lets you clean up images manually",
-    public: true,
-    default: true,
-  },
-
   // Emulator experiments
   emulatoruisnapshot: {
     shortDescription: "Load pre-release versions of the emulator UI",
+  },
+  emulatorapphosting: {
+    shortDescription: "App Hosting emulator",
+    public: false,
   },
 
   // Hosting experiments
@@ -121,15 +109,28 @@ export const ALL_EXPERIMENTS = experiments({
     public: false,
   },
 
+  // TODO(joehanley): Delete this once weve scrubbed all references to experiment from docs.
   dataconnect: {
-    shortDescription: "Enable Data Connect related features.",
-    fullDescription: "Enable Data Connect related features.",
+    shortDescription: "Deprecated. Previosuly, enabled Data Connect related features.",
+    fullDescription: "Deprecated. Previously, enabled Data Connect related features.",
     public: false,
   },
 
   genkit: {
     shortDescription: "Enable Genkit related features.",
     fullDescription: "Enable Genkit related features.",
+    default: true,
+    public: false,
+  },
+  appsinit: {
+    shortDescription: "Adds experimental `apps:init` command.",
+    fullDescription:
+      "Adds experimental `apps:init` command. When run from an app directory, this command detects the app's platform and configures required files.",
+    default: false,
+    public: true,
+  },
+  mcp: {
+    shortDescription: "Adds experimental `firebase mcp` command for running a Firebase MCP server.",
     default: true,
     public: false,
   },

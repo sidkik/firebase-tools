@@ -23,6 +23,7 @@ export const VALID_DEPLOY_TARGETS = [
   "remoteconfig",
   "extensions",
   "dataconnect",
+  "apphosting",
 ];
 export const TARGET_PERMISSIONS: Record<(typeof VALID_DEPLOY_TARGETS)[number], string[]> = {
   database: ["firebasedatabase.instances.update"],
@@ -84,11 +85,18 @@ export const command = new Command("deploy")
     'only deploy to specified, comma-separated targets (e.g. "hosting,storage"). For functions, ' +
       'can specify filters with colons to scope function deploys to only those functions (e.g. "--only functions:func1,functions:func2"). ' +
       "When filtering based on export groups (the exported module object keys), use dots to specify group names " +
-      '(e.g. "--only functions:group1.subgroup1,functions:group2)"' +
+      '(e.g. "--only functions:group1.subgroup1,functions:group2"). ' +
+      "When filtering based on codebases, use colons to specify codebase names " +
+      '(e.g. "--only functions:codebase1:func1,functions:codebase2:group1.subgroup1"). ' +
       "For data connect, can specify filters with colons to deploy only a service, connector, or schema" +
-      '(e.g. "--only dataconnect:serviceId,dataconnect:serviceId:connectorId,dataconnect:serviceId:schema"). ',
+      '(e.g. "--only dataconnect:serviceId,dataconnect:serviceId:connectorId,dataconnect:serviceId:schema")',
   )
   .option("--except <targets>", 'deploy to all targets except specified (e.g. "database")')
+  .option(
+    "--dry-run",
+    "perform a dry run of your deployment. Validates your changes and builds your code without deploying any changes to your project. " +
+      "In order to provide better validation, this may still enable APIs on the target project",
+  )
   .before(requireConfig)
   .before((options) => {
     options.filteredTargets = filterTargets(options, VALID_DEPLOY_TARGETS);
@@ -113,7 +121,13 @@ export const command = new Command("deploy")
       try {
         await requireHostingSite(options);
       } catch (err: unknown) {
-        if (err === errNoDefaultSite) {
+        const isPermissionError =
+          err instanceof FirebaseError &&
+          err.original instanceof FirebaseError &&
+          err.original.status === 403;
+        if (isPermissionError) {
+          throw err;
+        } else if (err === errNoDefaultSite) {
           createSite = true;
         }
       }

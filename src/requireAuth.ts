@@ -7,8 +7,8 @@ import { FirebaseError } from "./error";
 import { logger } from "./logger";
 import * as utils from "./utils";
 import * as scopes from "./scopes";
-import { Tokens, User } from "./types/auth";
-import { setRefreshToken, setActiveAccount } from "./auth";
+import { Tokens, TokensWithExpiration, User } from "./types/auth";
+import { setRefreshToken, setActiveAccount, setGlobalDefaultAccount, isExpired } from "./auth";
 import type { Options } from "./options";
 
 const AUTH_ERROR_MESSAGE = `Command requires authentication, please run ${clc.bold(
@@ -16,7 +16,7 @@ const AUTH_ERROR_MESSAGE = `Command requires authentication, please run ${clc.bo
 )}`;
 
 let authClient: GoogleAuth | undefined;
-
+let lastOptions: Options;
 /**
  * Returns the auth client.
  * @param config options for the auth client.
@@ -36,13 +36,11 @@ function getAuthClient(config: GoogleAuthOptions): GoogleAuth {
  * @param options CLI options.
  * @param authScopes scopes to be obtained.
  */
-async function autoAuth(options: Options, authScopes: string[]): Promise<void | string> {
-  if (process.env.MONOSPACE_ENV) {
-    throw new FirebaseError("autoAuth not yet implemented for IDX. Please run 'firebase login'");
-  }
+async function autoAuth(options: Options, authScopes: string[]): Promise<null | string> {
   const client = getAuthClient({ scopes: authScopes, projectId: options.project });
   const token = await client.getAccessToken();
   token !== null ? apiv2.setAccessToken(token) : false;
+  logger.debug(`Running auto auth`);
 
   let clientEmail;
   try {
@@ -52,21 +50,43 @@ async function autoAuth(options: Options, authScopes: string[]): Promise<void | 
     // Make sure any error here doesn't block the CLI, but log it.
     logger.debug(`Error getting account credentials.`);
   }
+  if (process.env.MONOSPACE_ENV && token && clientEmail) {
+    // Within monospace, this a OAuth token for the user, so we make it the active user.
+    const activeAccount = {
+      user: { email: clientEmail },
+      tokens: {
+        access_token: token,
+        expires_at: client.cachedCredential?.credentials.expiry_date,
+      } as TokensWithExpiration,
+    };
+    setActiveAccount(options, activeAccount);
+    setGlobalDefaultAccount(activeAccount);
 
-  return clientEmail;
+    // project is also selected in monospace auth flow
+    options.projectId = await client.getProjectId();
+  }
+  return clientEmail || null;
+}
+
+export async function refreshAuth(): Promise<Tokens> {
+  if (!lastOptions) {
+    throw new FirebaseError("Unable to refresh auth: not yet authenticated.");
+  }
+  await requireAuth(lastOptions);
+  return lastOptions.tokens as Tokens;
 }
 
 /**
  * Ensures that there is an authenticated user.
  * @param options CLI options.
  */
-export async function requireAuth(options: any): Promise<string | void> {
+export async function requireAuth(options: any): Promise<string | null> {
+  lastOptions = options;
   api.setScopes([scopes.CLOUD_PLATFORM, scopes.FIREBASE_PLATFORM]);
   options.authScopes = api.getScopes();
 
   const tokens = options.tokens as Tokens | undefined;
   const user = options.user as User | undefined;
-
   let tokenOpt = utils.getInheritedOption(options, "token");
   if (tokenOpt) {
     logger.debug("> authorizing via --token option");
@@ -80,7 +100,7 @@ export async function requireAuth(options: any): Promise<string | void> {
       "Authenticating with `FIREBASE_TOKEN` is deprecated and will be removed in a future major version of `firebase-tools`. " +
         "Instead, use a service account key with `GOOGLE_APPLICATION_CREDENTIALS`: https://cloud.google.com/docs/authentication/getting-started",
     );
-  } else if (user) {
+  } else if (user && (!isExpired(tokens) || tokens?.refresh_token)) {
     logger.debug(`> authorizing via signed-in user (${user.email})`);
   } else {
     try {
@@ -97,13 +117,15 @@ export async function requireAuth(options: any): Promise<string | void> {
 
   if (tokenOpt) {
     setRefreshToken(tokenOpt);
-    return;
+    return null;
   }
 
   if (!user || !tokens) {
     throw new FirebaseError(AUTH_ERROR_MESSAGE);
   }
 
+  // TODO: 90 percent sure this is redundant, as the only time we hit this is if options.user/options.token is set, and
+  // setActiveAccount is the only code that sets those.
   setActiveAccount(options, { user, tokens });
   return user.email;
 }

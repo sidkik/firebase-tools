@@ -16,7 +16,7 @@ export interface Service extends BaseResource {
 export interface Schema extends BaseResource {
   name: string;
 
-  primaryDatasource: Datasource;
+  datasources: Datasource[];
   source: Source;
 }
 
@@ -29,10 +29,12 @@ export interface Datasource {
   postgresql?: PostgreSql;
 }
 
+export type SchemaValidation = "STRICT" | "COMPATIBLE";
+
 export interface PostgreSql {
   database: string;
   cloudSql: CloudSqlInstance;
-  schemaValidation?: "STRICT" | "NONE" | "SQL_SCHEMA_VALIDATION_UNSPECIFIED";
+  schemaValidation?: SchemaValidation | "NONE" | "SQL_SCHEMA_VALIDATION_UNSPECIFIED";
 }
 
 export interface CloudSqlInstance {
@@ -69,14 +71,25 @@ export interface Diff {
   destructive: boolean;
 }
 
+export type WarningLevel = "INTERACTIVE_ACK" | "REQUIRE_ACK" | "REQUIRE_FORCE";
+
+export interface Workaround {
+  description: string;
+  reason: string;
+  replaceWith: string;
+}
+
 export interface GraphqlError {
   message: string;
+  path?: (string | number)[];
   locations?: {
     line: number;
     column: number;
   }[];
   extensions?: {
     file?: string;
+    warningLevel?: WarningLevel;
+    workarounds?: Workaround[];
     [key: string]: any;
   };
 }
@@ -102,6 +115,7 @@ export interface DataConnectYaml {
   specVersion?: string;
   serviceId: string;
   schema: SchemaYaml;
+  location: string;
   connectorDirs: string[];
 }
 
@@ -116,30 +130,53 @@ export interface DatasourceYaml {
     cloudSql: {
       instanceId: string;
     };
+    schemaValidation?: SchemaValidation;
   };
 }
 
 export interface ConnectorYaml {
   connectorId: string;
-  authMode?: "ADMIN" | "PUBLIC";
   generate?: Generate;
 }
 
 export interface Generate {
-  javascriptSdk?: JavascriptSDK[];
-  swiftSdk?: SwiftSDK[];
-  kotlinSdk?: KotlinSDK[];
+  javascriptSdk?: JavascriptSDK;
+  swiftSdk?: SwiftSDK;
+  kotlinSdk?: KotlinSDK;
+  dartSdk?: DartSDK;
 }
 
-export interface JavascriptSDK {
-  outputDir: string;
+export interface SupportedFrameworks {
+  react?: boolean;
+  angular?: boolean;
 }
+
+export interface JavascriptSDK extends SupportedFrameworks {
+  outputDir: string;
+  package: string;
+  packageJsonDir?: string;
+}
+
 export interface SwiftSDK {
-  // Optional for Swift becasue XCode makes you import files.
-  outputDir?: string;
+  outputDir: string;
+  package: string;
 }
 export interface KotlinSDK {
   outputDir: string;
+  package: string;
+}
+export interface DartSDK {
+  outputDir: string;
+  package: string;
+}
+
+export enum Platform {
+  NONE = "NONE",
+  ANDROID = "ANDROID",
+  WEB = "WEB",
+  IOS = "IOS",
+  FLUTTER = "FLUTTER",
+  MULTIPLE = "MULTIPLE",
 }
 
 // Helper types && converters
@@ -147,12 +184,15 @@ export interface ServiceInfo {
   serviceName: string;
   sourceDirectory: string;
   schema: Schema;
-  connectorInfo: {
-    connector: Connector;
-    connectorYaml: ConnectorYaml;
-  }[];
+  connectorInfo: ConnectorInfo[];
   dataConnectYaml: DataConnectYaml;
   deploymentMetadata?: DeploymentMetadata;
+}
+
+export interface ConnectorInfo {
+  directory: string;
+  connector: Connector;
+  connectorYaml: ConnectorYaml;
 }
 
 export function toDatasource(
@@ -160,13 +200,14 @@ export function toDatasource(
   locationId: string,
   ds: DatasourceYaml,
 ): Datasource {
-  if (ds.postgresql) {
+  if (ds?.postgresql) {
     return {
       postgresql: {
         database: ds.postgresql.database,
         cloudSql: {
           instance: `projects/${projectId}/locations/${locationId}/instances/${ds.postgresql.cloudSql.instanceId}`,
         },
+        schemaValidation: ds.postgresql.schemaValidation,
       },
     };
   }
@@ -182,14 +223,22 @@ export interface ExecuteGraphqlRequest {
   extensions?: { impersonate?: Impersonation };
 }
 
-export interface ExecuteGraphqlResponse {
+export interface GraphqlResponse {
   data: Record<string, any>;
   errors: any[];
 }
 
-export interface ExecuteGraphqlResponseError {
+export interface ExecuteOperationRequest {
+  operationName: string;
+  variables?: { [key: string]: string };
+}
+
+export interface GraphqlResponseError {
   error: { code: number; message: string; status: string; details: any[] };
 }
+
+export const isGraphQLResponse = (g: any): g is GraphqlResponse => !!g.data || !!g.errors;
+export const isGraphQLResponseError = (g: any): g is GraphqlResponseError => !!g.error;
 
 interface ImpersonationAuthenticated {
   authClaims: any;

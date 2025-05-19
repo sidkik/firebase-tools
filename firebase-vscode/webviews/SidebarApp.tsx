@@ -1,211 +1,273 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect } from "react";
 import { Spacer } from "./components/ui/Spacer";
-import { broker, useBroker } from "./globals/html-broker";
+import { broker, brokerSignal, useBroker } from "./globals/html-broker";
 import { AccountSection } from "./components/AccountSection";
 import { ProjectSection } from "./components/ProjectSection";
-import { HostingInitState, DeployState } from "./webview-types";
+import {
+  VSCodeButton,
+  VSCodeDropdown,
+  VSCodeOption,
+  VSCodeProgressRing,
+} from "@vscode/webview-ui-toolkit/react";
+import { Body, Label } from "./components/ui/Text";
+import { PanelSection } from "./components/ui/PanelSection";
+import { EmulatorPanel as Emulators } from "./components/EmulatorPanel";
+import { App } from "./globals/app";
+import { signal, useComputed } from "@preact/signals-react";
+import { Icon } from "./components/ui/Icon";
+import { ExternalLink } from "./components/ui/ExternalLink";
 
-import { webLogger } from "./globals/web-logger";
-import { ValueOrError } from "./messaging/protocol";
-import { FirebaseConfig } from "../../src/firebaseConfig";
-import { RCData } from "../../src/rc";
-import { VSCodeButton } from "@vscode/webview-ui-toolkit/react";
+const user = brokerSignal("notifyUserChanged", {
+  initialRequest: "getInitialData",
+});
+const isLoadingUser = brokerSignal("notifyIsLoadingUser");
+const project = brokerSignal("notifyProjectChanged");
+const env = brokerSignal("notifyEnv");
+const configs = brokerSignal("notifyFirebaseConfig", {
+  initialRequest: "getInitialData",
+});
+const hasFdcConfigs = brokerSignal("notifyHasFdcConfigs", {
+  initialRequest: "getInitialHasFdcConfigs",
+});
+const emulatorsRunningInfo = brokerSignal("notifyEmulatorStateChanged", {
+  initialRequest: "getEmulatorInfos",
+});
+const docsLink = brokerSignal("notifyDocksLink", {
+  initialRequest: "getDocsLink",
+});
 
-export function SidebarApp() {
-  const env = useBroker("notifyEnv")?.env;
-  /**
-   * null - has not finished checking yet
-   * empty array - finished checking, no users logged in
-   * non-empty array - contains logged in users
-   */
-  const allUsers = useBroker("notifyUsers")?.users;
-  const user = useBroker("notifyUserChanged")?.user;
+const showResetPanel = brokerSignal("notifyEmulatorsHanging");
 
-  const configs = useBroker("notifyFirebaseConfig", {
-    initialRequest: "getInitialData",
+function Welcome() {
+  const configLabel = useComputed(() => {
+    return !hasFdcConfigs.value ? "dataconnect.yaml" : "firebase.json";
   });
-  const hasFdcConfigs =
-    useBroker("notifyHasFdcConfigs", {
-      initialRequest: "getInitialHasFdcConfigs",
-    }) ?? false;
-  const accountSection = (
-    <AccountSection
-      user={user}
-      allUsers={allUsers}
-      isMonospace={env?.isMonospace}
-    />
+
+  return (
+    <>
+      <Body>
+        No <code>{configLabel.value}</code> detected in this project
+      </Body>
+      <Spacer size="medium" />
+      <VSCodeButton
+        onClick={() => {
+          broker.send("runFirebaseInit");
+        }}
+      >
+        Run firebase init
+      </VSCodeButton>
+    </>
   );
-  // Just render the account section loading view if it doesn't know user state
-  if (!allUsers || allUsers.length === 0) {
-    return (
-      <>
-        <Spacer size="medium" />
-        Login to use the Firebase plugin
-        <Spacer size="small" />
-        {accountSection}
-      </>
-    );
-  }
-  if (!configs?.firebaseJson?.value || !hasFdcConfigs) {
-    const configLabel = !hasFdcConfigs ? "dataconnect.yaml" : "firebase.json";
-
-    return (
-      <>
-        {accountSection}
-        <p>
-          No <code>{configLabel}</code> detected in this project
-        </p>
-        <br />
-        <VSCodeButton
-          onClick={() => {
-            broker.send("runFirebaseInit");
-          }}
-        >
-          Run firebase init
-        </VSCodeButton>
-      </>
-    );
-  }
-
-  return <SidebarContent configs={configs} />;
 }
 
-function SidebarContent(props: {
-  configs: {
-    firebaseJson: ValueOrError<FirebaseConfig>;
-    firebaseRC: ValueOrError<RCData>;
-  };
-}) {
-  const [deployState, setDeployState] = useState<DeployState>(null);
-  const [hostingInitState, setHostingInitState] =
-    useState<HostingInitState>(null);
-  const [framework, setFramework] = useState<string | null>(null);
-
-  const firebaseJson = props.configs?.firebaseJson;
-  const firebaseRC = props.configs?.firebaseRC;
-
-  const projectId = firebaseRC?.value?.projects?.default;
-
-  const env = useBroker("notifyEnv")?.env;
-  /**
-   * null - has not finished checking yet
-   * empty array - finished checking, no users logged in
-   * non-empty array - contains logged in users
-   */
-  const allUsers = useBroker("notifyUsers")?.users;
-  const user = useBroker("notifyUserChanged")?.user;
-
-  const channels = useBroker("notifyChannels")?.channels;
-
-  useEffect(() => {
-    webLogger.debug("loading SidebarApp component");
-    broker.send("getInitialData");
-
-    broker.on("notifyFirebaseConfig", ({ firebaseJson, firebaseRC }) => {
-      webLogger.debug(
-        "notifyFirebaseConfig",
-        JSON.stringify(firebaseJson),
-        JSON.stringify(firebaseRC),
-      );
-      if (firebaseJson?.value?.hosting) {
-        webLogger.debug("Detected firebase.json");
-        setHostingInitState("success");
-        // TODO this probably should be cached, to avoid showing the message every time.
-        // Even more so considering notifyFirebaseConfig fires on every "getInitialData", which could happen on user interaction.
-        broker.send("showMessage", {
-          msg: "Auto-detected hosting setup in this folder",
-        });
-      } else {
-        setHostingInitState(null);
-      }
-    });
-
-    broker.on(
-      "notifyHostingInitDone",
-      ({ success, projectId, folderPath, framework }) => {
-        if (success) {
-          webLogger.debug(`notifyHostingInitDone: ${projectId}, ${folderPath}`);
-          setHostingInitState("success");
-          if (framework) {
-            setFramework(framework);
-          }
-        } else {
-          setHostingInitState(null);
-        }
-      },
+function EmulatorsPanel() {
+  if (emulatorsRunningInfo.value?.status === "starting") {
+    const runningPanel = (
+      <>
+        <label>Emulator starting: see integrated terminal</label>
+        <VSCodeProgressRing></VSCodeProgressRing>
+      </>
     );
 
-    broker.on("notifyHostingDeploy", ({ success }) => {
-      webLogger.debug(`notifyHostingDeploy: ${success}`);
-      setDeployState(success ? "success" : "failure");
-    });
-  }, []);
-
-  function setupHosting() {
-    broker.send("selectAndInitHostingFolder", {
-      projectId,
-      singleAppSupport: true,
-    });
+    if (showResetPanel.value) {
+      return (
+        <>
+          <Spacer size="medium"></Spacer>
+          <label>
+            Emulator start-up is taking a while. In case of error, click
+            refresh.
+          </label>
+          <VSCodeProgressRing></VSCodeProgressRing>
+          <Spacer size="medium"></Spacer>
+          <VSCodeButton
+            appearance="secondary"
+            onClick={() => {
+              broker.send("getEmulatorInfos");
+              showResetPanel.value = false;
+            }}
+          >
+            Refresh Emulator View
+          </VSCodeButton>
+        </>
+      );
+    }
+    return runningPanel;
   }
 
-  const accountSection = (
-    <AccountSection
-      user={user}
-      allUsers={allUsers}
-      isMonospace={env?.isMonospace}
-    />
+  return emulatorsRunningInfo.value?.infos &&
+    emulatorsRunningInfo.value?.status === "running" ? (
+    <Emulators emulatorInfo={emulatorsRunningInfo.value.infos!} />
+  ) : (
+    <>
+      <VSCodeButton
+        appearance="secondary"
+        onClick={() => broker.send("runStartEmulators")}
+      >
+        Start emulators
+      </VSCodeButton>
+      <Spacer size="xsmall" />
+      <Label level={3}>
+        <a
+          onClick={() => {
+            broker.send("fdc.open-emulator-settings");
+          }}
+        >
+          Configure emulator
+        </a>
+      </Label>
+      <Label level={3}>
+        See also:{" "}
+        <a href="https://firebase.google.com/docs/emulator-suite">
+          Introduction to Firebase emulators
+        </a>
+      </Label>
+    </>
   );
+}
+
+const deployMenu = signal(false);
+
+function DataConnect() {
+  return (
+    <>
+      {docsLink.value && (
+        <>
+          <Body>
+            <ExternalLink href={docsLink.value} prefix={<Icon icon="book" />}>
+              View reference docs
+            </ExternalLink>
+          </Body>
+          <Spacer size="xlarge" />
+        </>
+      )}
+
+      <VSCodeButton
+        onClick={() => broker.send("fdc.configure-sdk")}
+        appearance="secondary"
+      >
+        Add SDK to app
+      </VSCodeButton>
+      <Spacer size="xsmall" />
+      <Label level={3}>
+        See also:{" "}
+        <a href="https://firebase.google.com/docs/data-connect/web-sdk">
+          Working with generated SDKs
+        </a>
+      </Label>
+
+      <Spacer size="xlarge" />
+      <VSCodeButton onClick={() => broker.send("fdc.deploy-all")}>
+        Deploy to production
+      </VSCodeButton>
+      <Spacer size="xsmall" />
+      <Label level={3}>
+        See also:{" "}
+        <a href="https://firebase.google.com/docs/data-connect/quickstart#deploy_your_schema_to_production">
+          Deploying schema and connectors
+        </a>
+      </Label>
+      <Spacer size="xlarge"></Spacer>
+      <Label level={2}>Generate Schema and Operations (Preview)</Label>
+      <Spacer size="medium"></Spacer>
+      <VSCodeButton
+        appearance="secondary"
+        onClick={() => {
+          broker.send("firebase.activate.gemini");
+        }}
+      >
+        Try Gemini with @data-connect
+      </VSCodeButton>
+      <Spacer size="xsmall" />
+      <Label level={3}>
+        See also:{" "}
+        <a href="https://firebase.google.com/docs/gemini-in-firebase#how-gemini-in-firebase-uses-your-data">
+          Gemini in Firebase Usage and Terms
+        </a>
+      </Label>
+    </>
+  );
+}
+function Content() {
+  useEffect(() => {
+    broker.send("getDocsLink");
+  }, []);
+
+  return (
+    <>
+      <PanelSection>
+        <EmulatorsPanel />
+      </PanelSection>
+      <PanelSection isLast={true}>
+        <DataConnect />
+      </PanelSection>
+    </>
+  );
+}
+
+function ConfigPicker() {
+  const configs = useBroker("notifyFirebaseConfigListChanged", {
+    initialRequest: "getInitialFirebaseConfigList",
+  });
+
+  if (!configs || configs.values.length < 2) {
+    // Only show the picker when there are multiple configs
+    return <></>;
+  }
 
   return (
     <>
       <Spacer size="medium" />
-      {accountSection}
-      {!!user && (
-        <ProjectSection
-          user={user}
-          projectId={projectId}
-          isMonospace={env?.isMonospace}
+
+      <Label>Choose a `firebase.json` location</Label>
+      <VSCodeDropdown
+        value={configs.selected}
+        onChange={(e) =>
+          broker.send("selectFirebaseConfig", (e.target as any).value)
+        }
+      >
+        {configs.values.map((uri) => (
+          <VSCodeOption key={uri}>{uri}</VSCodeOption>
+        ))}
+      </VSCodeDropdown>
+    </>
+  );
+}
+
+export function SidebarApp() {
+  const isInitialized = useComputed(() => {
+    return !!configs.value?.firebaseJson?.value && hasFdcConfigs.value;
+  });
+
+  if (isLoadingUser.value) {
+    return <Body>Loading...</Body>;
+  }
+
+  return (
+    <App>
+      <PanelSection>
+        <AccountSection
+          user={user.value?.user ?? null}
+          isLoadingUser={false}
+          isMonospace={env.value?.env.isMonospace ?? false}
         />
-      )}
-      {
-        // TODO: disable hosting completely
-        /* {hostingInitState === "success" &&
-        !!user &&
-        !!projectId &&
-        env?.isMonospace && (
-          <DeployPanel
-            deployState={deployState}
-            setDeployState={setDeployState}
-            projectId={projectId}
-            channels={channels}
-            framework={framework}
+        {user.value?.user && project.value && (
+          <ProjectSection
+            user={user.value.user}
+            projectId={project.value?.projectId}
+            isMonospace={env.value?.env.isMonospace ?? false}
           />
         )}
-      <Spacer size="large" />
-      {hostingInitState !== "success" &&
-        !!user &&
-        !!projectId &&
-        env?.isMonospace && (
-          <InitFirebasePanel
-            onHostingInit={() => {
-              setupHosting();
-            }}
-            hostingInitState={hostingInitState}
-            setHostingInitState={setHostingInitState}
-          />
-        )} */
-      }
-      {
-        // disable emulator panel for now, as we have an individual emulator panel in the FDC section
-      }
-      {/* { 
-        // Only load the emulator panel if we have a user, firebase.json and this isn't Monospace
-        // The user login requirement can be removed in the future but the panel will have to
-        // be restricted to full-offline emulation only.
-        !!user && firebaseJson && firebaseJson.value && (
-          <EmulatorPanel firebaseJson={firebaseJson.value} />
-        )
-      } */}
-    </>
+        <ConfigPicker />
+      </PanelSection>
+
+      {user.value &&
+        (isInitialized.value ? (
+          <Content />
+        ) : (
+          <PanelSection isLast={true}>
+            <Welcome />
+          </PanelSection>
+        ))}
+    </App>
   );
 }

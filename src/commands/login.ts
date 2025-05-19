@@ -1,4 +1,3 @@
-import * as _ from "lodash";
 import * as clc from "colorette";
 
 import { Command } from "../command";
@@ -6,7 +5,7 @@ import { logger } from "../logger";
 import { configstore } from "../configstore";
 import * as utils from "../utils";
 import { FirebaseError } from "../error";
-import { promptOnce } from "../prompt";
+import { confirm } from "../prompt";
 
 import * as auth from "../auth";
 import { isCloudEnvironment } from "../utils";
@@ -38,12 +37,9 @@ export const command = new Command("login")
       utils.logBullet(
         "Firebase optionally collects CLI and Emulator Suite usage and error reporting information to help improve our products. Data is collected in accordance with Google's privacy policy (https://policies.google.com/privacy) and is not used to identify you.\n",
       );
-      const collectUsage = await promptOnce({
-        type: "confirm",
-        name: "collectUsage",
-        message:
-          "Allow Firebase to collect CLI and Emulator Suite usage and error reporting information?",
-      });
+      const collectUsage = await confirm(
+        "Allow Firebase to collect CLI and Emulator Suite usage and error reporting information?",
+      );
       configstore.set("usage", collectUsage);
       if (collectUsage) {
         utils.logBullet(
@@ -57,7 +53,7 @@ export const command = new Command("login")
     // the authorization callback couldn't redirect to localhost.
     const useLocalhost = isCloudEnvironment() ? false : options.localhost;
 
-    const result = await auth.loginGoogle(useLocalhost, _.get(user, "email"));
+    const result = await auth.loginGoogle(useLocalhost, user?.email);
     configstore.set("user", result.user);
     configstore.set("tokens", result.tokens);
     // store login scopes in case mandatory scopes grow over time

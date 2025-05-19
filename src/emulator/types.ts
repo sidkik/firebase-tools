@@ -8,6 +8,7 @@ export enum Emulators {
   FIRESTORE = "firestore",
   DATABASE = "database",
   HOSTING = "hosting",
+  APPHOSTING = "apphosting",
   PUBSUB = "pubsub",
   UI = "ui",
   LOGGING = "logging",
@@ -15,6 +16,7 @@ export enum Emulators {
   EXTENSIONS = "extensions",
   EVENTARC = "eventarc",
   DATACONNECT = "dataconnect",
+  TASKS = "tasks",
 }
 
 export type DownloadableEmulators =
@@ -24,6 +26,7 @@ export type DownloadableEmulators =
   | Emulators.UI
   | Emulators.STORAGE
   | Emulators.DATACONNECT;
+
 export const DOWNLOADABLE_EMULATORS = [
   Emulators.FIRESTORE,
   Emulators.DATABASE,
@@ -33,15 +36,22 @@ export const DOWNLOADABLE_EMULATORS = [
   Emulators.DATACONNECT,
 ];
 
-export type ImportExportEmulators = Emulators.FIRESTORE | Emulators.DATABASE | Emulators.AUTH;
+export type ImportExportEmulators =
+  | Emulators.FIRESTORE
+  | Emulators.DATABASE
+  | Emulators.AUTH
+  | Emulators.STORAGE
+  | Emulators.DATACONNECT;
 export const IMPORT_EXPORT_EMULATORS = [
   Emulators.FIRESTORE,
   Emulators.DATABASE,
   Emulators.AUTH,
   Emulators.STORAGE,
+  Emulators.DATACONNECT,
 ];
 
 export const ALL_SERVICE_EMULATORS = [
+  Emulators.APPHOSTING,
   Emulators.AUTH,
   Emulators.FUNCTIONS,
   Emulators.FIRESTORE,
@@ -51,6 +61,7 @@ export const ALL_SERVICE_EMULATORS = [
   Emulators.STORAGE,
   Emulators.EVENTARC,
   Emulators.DATACONNECT,
+  Emulators.TASKS,
 ].filter((v) => v);
 
 export const EMULATORS_SUPPORTED_BY_FUNCTIONS = [
@@ -59,6 +70,7 @@ export const EMULATORS_SUPPORTED_BY_FUNCTIONS = [
   Emulators.PUBSUB,
   Emulators.STORAGE,
   Emulators.EVENTARC,
+  Emulators.TASKS,
 ];
 
 export const EMULATORS_SUPPORTED_BY_UI = [
@@ -155,6 +167,7 @@ export interface DownloadableEmulatorCommand {
   optionalArgs: string[];
   joinArgs: boolean;
   shell: boolean;
+  port?: number;
 }
 
 export interface EmulatorDownloadOptions {
@@ -172,6 +185,7 @@ export interface EmulatorUpdateDetails {
   version: string;
   expectedSize: number;
   expectedChecksum: string;
+  expectedChecksumSHA256: string; // TODO: Use this for validation within the CLI as well.
 }
 
 export interface EmulatorDownloadDetails {

@@ -1,29 +1,45 @@
 import fetch, { Response } from "node-fetch";
+import { ExtensionContext } from "vscode";
 import {
   ExecutionResult,
   IntrospectionQuery,
   getIntrospectionQuery,
 } from "graphql";
-import { computed } from "@preact/signals-core";
-import { assertExecutionResult } from "../../common/graphql";
 import { DataConnectError } from "../../common/error";
 import { AuthService } from "../auth/service";
 import { UserMockKind } from "../../common/messaging/protocol";
 import { firstWhereDefined } from "../utils/signal";
 import { EmulatorsController } from "../core/emulators";
-import { Emulators } from "../cli";
-import { dataConnectConfigs } from "../data-connect/config";
+import { dataConnectConfigs, VSCODE_ENV_VARS } from "../data-connect/config";
 
 import { firebaseRC } from "../core/config";
-import { executeGraphQL } from "../../../src/dataconnect/dataplaneClient";
+import {
+  dataconnectDataplaneClient,
+  dataconnectOrigin,
+  executeGraphQL,
+  DATACONNECT_API_VERSION,
+} from "../../../src/dataconnect/dataplaneClient";
+
+import {
+  cloudAICompationClient,
+  callCloudAICompanion,
+} from "../../../src/dataconnect/cloudAiCompanionClient";
+
 import {
   ExecuteGraphqlRequest,
-  ExecuteGraphqlResponse,
-  ExecuteGraphqlResponseError,
+  GraphqlResponse,
+  GraphqlResponseError,
   Impersonation,
 } from "../dataconnect/types";
-import { ClientResponse } from "../apiv2";
+import {
+  CloudAICompanionResponse,
+  CallCloudAiCompanionRequest,
+  ChatMessage,
+} from "../dataconnect/cloudAICompanionTypes";
+import { Client, ClientResponse } from "../../../src/apiv2";
 import { InstanceType } from "./code-lens-provider";
+import { pluginLogger } from "../logger-wrapper";
+import { DataConnectToolkit } from "./toolkit";
 
 /**
  * DataConnect Emulator service
@@ -31,46 +47,29 @@ import { InstanceType } from "./code-lens-provider";
 export class DataConnectService {
   constructor(
     private authService: AuthService,
+    private dataConnectToolkit: DataConnectToolkit,
     private emulatorsController: EmulatorsController,
+    private context: ExtensionContext,
   ) {}
 
-  readonly localEndpoint = computed<string | undefined>(() => {
-    const emulatorInfos =
-      this.emulatorsController.emulators.value.infos?.displayInfo;
-    const dataConnectEmulator = emulatorInfos?.find(
-      (emulatorInfo) => emulatorInfo.name === Emulators.DATACONNECT,
-    );
-
-    if (!dataConnectEmulator) {
-      return undefined;
-    }
-
-    return (
-      "http://" + dataConnectEmulator.host + ":" + dataConnectEmulator.port
-    );
-  });
-
-  async servicePath(
-    path: string,
-    instance: InstanceType,
-  ): Promise<string | undefined> {
+  async servicePath(path: string): Promise<string | undefined> {
     const dataConnectConfigsValue = await firstWhereDefined(dataConnectConfigs);
     // TODO: avoid calling this here and in getApiServicePathByPath
     const serviceId =
-      dataConnectConfigsValue?.tryReadValue.findEnclosingServiceForPath(path)
-        .value.serviceId;
+      dataConnectConfigsValue?.tryReadValue?.findEnclosingServiceForPath(path)
+        ?.value.serviceId;
     const projectId = firebaseRC.value?.tryReadValue?.projects?.default;
 
     if (serviceId === undefined || projectId === undefined) {
       return undefined;
     }
 
-    return instance === InstanceType.PRODUCTION
-      ? dataConnectConfigsValue?.tryReadValue?.getApiServicePathByPath(
-          projectId,
-          path,
-        )
-      : `projects/p/locations/l/services/${serviceId}`;
+    return (
+      dataConnectConfigsValue?.tryReadValue?.getApiServicePathByPath(
+        projectId,
+        path,
+      ) || `projects/p/locations/l/services/${serviceId}`
+    );
   }
 
   private async decodeResponse(
@@ -95,47 +94,29 @@ export class DataConnectService {
     return response.text();
   }
   private async handleProdResponse(
-    clientResponse: ClientResponse<
-      ExecuteGraphqlResponse | ExecuteGraphqlResponseError
-    >,
+    response: ClientResponse<GraphqlResponse | GraphqlResponseError>,
   ): Promise<ExecutionResult> {
-    if (!(clientResponse.status >= 200 && clientResponse.status < 300)) {
-      const errorResponse =
-        clientResponse as ClientResponse<ExecuteGraphqlResponseError>;
+    if (!(response.status >= 200 && response.status < 300)) {
+      const errorResponse = response as ClientResponse<GraphqlResponseError>;
       throw new DataConnectError(
-        `Request failed with status ${clientResponse.status}`,
-        errorResponse.body.error.message,
+        `Prod Request failed with status ${response.status}\nError Response: ${JSON.stringify(errorResponse?.body)}`,
       );
     }
-    const successResponse =
-      clientResponse as ClientResponse<ExecuteGraphqlResponse>;
+    const successResponse = response as ClientResponse<GraphqlResponse>;
     return successResponse.body;
   }
 
-  private async handleValidResponse(
-    response: Response,
+  private async handleEmulatorResponse(
+    response: ClientResponse<GraphqlResponse | GraphqlResponseError>,
   ): Promise<ExecutionResult> {
-    const json = await this.decodeResponse(response, "application/json");
-    assertExecutionResult(json);
-
-    return json;
-  }
-
-  private async handleInvalidResponse(response: Response): Promise<never> {
-    const cause = await this.decodeResponse(response);
-
-    throw new DataConnectError(
-      `Request failed with status ${response.status}`,
-      cause,
-    );
-  }
-
-  private handleResponse(response: Response): Promise<ExecutionResult> {
-    if (response.status >= 200 && response.status < 300) {
-      return this.handleValidResponse(response);
+    if (!(response.status >= 200 && response.status < 300)) {
+      const errorResponse = response as ClientResponse<GraphqlResponseError>;
+      throw new DataConnectError(
+        `Emulator Request failed with status ${response.status}\nError Response: ${JSON.stringify(errorResponse?.body)}`,
+      );
     }
-
-    return this.handleInvalidResponse(response);
+    const successResponse = response as ClientResponse<GraphqlResponse>;
+    return successResponse.body;
   }
 
   /** Encode a body while handling the fact that "variables" is raw JSON.
@@ -192,7 +173,7 @@ export class DataConnectService {
       return { data: (introspectionResults as any).data };
     } catch (e) {
       // TODO: surface error that emulator is not connected
-      console.error("error: ", e);
+      pluginLogger.error("error: ", e);
       return { data: undefined };
     }
   }
@@ -205,7 +186,7 @@ export class DataConnectService {
     // TODO: get introspections for all services
     const configs = await firstWhereDefined(dataConnectConfigs);
     // Using "requireValue", so that if configs are not available, the execution should throw.
-    const serviceId = configs.requireValue.serviceIds[0];
+    const serviceId = configs.requireValue?.serviceIds[0];
     try {
       // TODO: get name programmatically
       const body = this._serializeBody({
@@ -214,8 +195,8 @@ export class DataConnectService {
         extensions: {}, // Introspection is the only caller of executeGraphqlRead
       });
       const resp = await fetch(
-        (await firstWhereDefined(this.localEndpoint)) +
-          `/v1alpha/projects/p/locations/l/services/${serviceId}:executeGraphqlRead`,
+        (await this.dataConnectToolkit.getFDCToolkitURL()) +
+          `/v1/projects/p/locations/l/services/${serviceId}:executeGraphqlRead`,
         {
           method: "POST",
           headers: {
@@ -230,7 +211,7 @@ export class DataConnectService {
       return result;
     } catch (e) {
       // TODO: actual error handling
-      console.log(e);
+      pluginLogger.error(e);
       return null;
     }
   }
@@ -242,14 +223,13 @@ export class DataConnectService {
     path: string;
     instance: InstanceType;
   }) {
-    const servicePath = await this.servicePath(params.path, params.instance);
+    const servicePath = await this.servicePath(params.path);
     if (!servicePath) {
       throw new Error("No service found for path: " + params.path);
     }
-
     const prodBody: ExecuteGraphqlRequest = {
       operationName: params.operationName,
-      variables: JSON.parse(params.variables),
+      variables: parseVariableString(params.variables),
       query: params.query,
       name: `${servicePath}`,
       extensions: this._auth(),
@@ -261,23 +241,68 @@ export class DataConnectService {
       extensions: this._auth(),
     });
     if (params.instance === InstanceType.PRODUCTION) {
-      const resp = await executeGraphQL(servicePath, prodBody);
+      const client = dataconnectDataplaneClient();
+      pluginLogger.info(
+        `ExecuteGraphQL (${dataconnectOrigin()}) request: ${JSON.stringify(prodBody, undefined, 4)}`,
+      );
+      const resp = await executeGraphQL(client, servicePath, prodBody);
       return this.handleProdResponse(resp);
     } else {
-      const resp = await fetch(
-        (await firstWhereDefined(this.localEndpoint)) +
-          `/v1alpha/${servicePath}:executeGraphql`,
-        {
-          method: "POST",
-          headers: {
-            Accept: "application/json",
-            "Content-Type": "application/json",
-            "x-mantle-admin": "all",
-          },
-          body,
-        },
-      );
-      return this.handleResponse(resp);
+      const endpoint = this.emulatorsController.getLocalEndpoint();
+      if (!endpoint) {
+        throw new DataConnectError(
+          `Emulator isn't running. Please start your emulator!`,
+        );
+      }
+      const client = new Client({
+        urlPrefix: endpoint,
+        apiVersion: DATACONNECT_API_VERSION,
+      });
+      const resp = await executeGraphQL(client, servicePath, prodBody);
+      return this.handleEmulatorResponse(resp);
     }
+  }
+
+  docsLink() {
+    return this.dataConnectToolkit.getGeneratedDocsURL();
+  }
+
+  // Start cloud section
+
+  async generateOperation(
+    path: string /** currently unused; instead reading the first service config */,
+    naturalLanguageQuery: string,
+    type: "schema" | "operation",
+    chatHistory: ChatMessage[],
+  ): Promise<CloudAICompanionResponse | undefined> {
+    const client = cloudAICompationClient();
+    const servicePath = await this.servicePath(
+      dataConnectConfigs.value?.tryReadValue?.values[0].path as string,
+    );
+
+    if (!servicePath) {
+      return undefined;
+    }
+
+    const request: CallCloudAiCompanionRequest = {
+      servicePath,
+      naturalLanguageQuery,
+      chatHistory,
+    };
+    const resp = await callCloudAICompanion(client, request, type);
+    return resp;
+  }
+}
+
+function parseVariableString(variables: string): Record<string, any> {
+  if (!variables) {
+    return {};
+  }
+  try {
+    return JSON.parse(variables);
+  } catch (e: any) {
+    throw new Error(
+      "Unable to parse variables as JSON. Double check that that there are no unmatched braces or quotes, or unqouted keys in the variables pane.",
+    );
   }
 }

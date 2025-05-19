@@ -1,6 +1,6 @@
 import vscode, { Disposable } from "vscode";
 import { ExtensionBrokerImpl } from "../extension-broker";
-import { computed, effect } from "@preact/signals-react";
+import { computed, effect, Signal } from "@preact/signals-react";
 import { firebaseRC, updateFirebaseRCProject } from "./config";
 import { FirebaseProjectMetadata } from "../types/project";
 import { currentUser, isServiceAccount } from "./user";
@@ -8,56 +8,65 @@ import { listProjects } from "../cli";
 import { pluginLogger } from "../logger-wrapper";
 import { globalSignal } from "../utils/globals";
 import { firstWhereDefined } from "../utils/signal";
-
+import { User } from "../types/auth";
+import { DATA_CONNECT_EVENT_NAME, AnalyticsLogger } from "../analytics";
 /** Available projects */
 export const projects = globalSignal<Record<string, FirebaseProjectMetadata[]>>(
   {},
 );
 
 /** Currently selected project ID */
-export const currentProjectId = globalSignal("");
+export const currentProjectId = computed(() => {
+  const rc = firebaseRC.value?.tryReadValue;
+
+  return rc?.projects.default;
+});
 
 const userScopedProjects = computed<FirebaseProjectMetadata[] | undefined>(
   () => {
     return projects.value[currentUser.value?.email ?? ""];
   },
-);
+) as Signal<FirebaseProjectMetadata[] | undefined>;
 
-/** Gets the currently selected project, fallback to first default project in RC file */
-export const currentProject = computed<FirebaseProjectMetadata | undefined>(
-  () => {
-    // Service accounts should only have one project
-    if (isServiceAccount.value) {
-      return userScopedProjects.value?.[0];
-    }
+export function registerProject(
+  broker: ExtensionBrokerImpl,
+  analyticsLogger: AnalyticsLogger,
+): Disposable {
+  // For testing purposes.
+  const demoProjectCommand = vscode.commands.registerCommand(
+    `fdc-graphql.mock.project`,
+    (projectId: string) => {
+      updateFirebaseRCProject({
+        projectAlias: projectId
+          ? {
+              alias: "default",
+              projectId,
+            }
+          : undefined,
+      });
+      broker.send("notifyProjectChanged", { projectId });
+    },
+  );
 
-    const wantProjectId =
-      currentProjectId.value ||
-      firebaseRC.value?.tryReadValue?.projects["default"];
-    if (!wantProjectId) {
-      return undefined;
-    }
+  async function fetchNewProjects(user: User) {
+    const userProjects = await listProjects();
+    projects.value = {
+      ...projects.value,
+      [user.email]: userProjects,
+    };
+  }
 
-    return userScopedProjects.value?.find((p) => p.projectId === wantProjectId);
-  },
-);
-
-export function registerProject(broker: ExtensionBrokerImpl): Disposable {
-  const sub1 = effect(async () => {
+  const sub1 = effect(() => {
     const user = currentUser.value;
     if (user) {
       pluginLogger.info("(Core:Project) New user detected, fetching projects");
-      const userProjects = await listProjects();
-      projects.value = {
-        ...projects.value,
-        [user.email]: userProjects,
-      };
+      fetchNewProjects(user);
     }
   });
 
   const sub2 = effect(() => {
     broker.send("notifyProjectChanged", {
-      projectId: currentProject.value?.projectId ?? "",
+      projectId: currentProjectId.value ?? "",
     });
   });
 
@@ -71,19 +80,22 @@ export function registerProject(broker: ExtensionBrokerImpl): Disposable {
     }
   });
 
-  // Initialize currentProjectId to default project ID
-  const sub4 = effect(() => {
-    if (!currentProjectId.value) {
-      currentProjectId.value = firebaseRC.value?.tryReadValue?.projects.default;
-    }
-  });
-
   const sub5 = broker.on("getInitialData", () => {
+    let wantProjectId =
+      currentProjectId.value ||
+      firebaseRC.value?.tryReadValue?.projects["default"];
+    // Service accounts should only have one project
+    if (isServiceAccount.value) {
+      wantProjectId = userScopedProjects.value?.[0].projectId;
+    }
+
     broker.send("notifyProjectChanged", {
-      projectId: currentProject.value?.projectId ?? "",
+      projectId: wantProjectId ?? "",
     });
   });
 
+  // TODO: In IDX, should we just client.GetProject() from the metadata server?
+  // Should we instead hide this command entirely?
   const command = vscode.commands.registerCommand(
     "firebase.selectProject",
     async () => {
@@ -91,11 +103,27 @@ export function registerProject(broker: ExtensionBrokerImpl): Disposable {
         return;
       } else {
         try {
+          analyticsLogger.logger.logUsage(
+            DATA_CONNECT_EVENT_NAME.PROJECT_SELECT_CLICKED,
+          );
+
           const projects = firstWhereDefined(userScopedProjects);
 
-          currentProjectId.value =
+          const projectId =
             (await _promptUserForProject(projects)) ?? currentProjectId.value;
-        } catch (e) {
+
+          updateFirebaseRCProject({
+            projectAlias: projectId
+              ? {
+                  alias: "default",
+                  projectId,
+                }
+              : undefined,
+          });
+          analyticsLogger.logger.logUsage(
+            DATA_CONNECT_EVENT_NAME.PROJECT_SELECTED,
+          );
+        } catch (e: any) {
           vscode.window.showErrorMessage(e.message);
         }
       }
@@ -108,10 +136,10 @@ export function registerProject(broker: ExtensionBrokerImpl): Disposable {
 
   return vscode.Disposable.from(
     command,
+    demoProjectCommand,
     { dispose: sub1 },
     { dispose: sub2 },
     { dispose: sub3 },
-    { dispose: sub4 },
     { dispose: sub5 },
     { dispose: sub6 },
   );

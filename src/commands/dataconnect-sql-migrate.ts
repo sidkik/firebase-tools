@@ -10,16 +10,15 @@ import { ensureApis } from "../dataconnect/ensureApis";
 import { logLabeledSuccess } from "../utils";
 
 export const command = new Command("dataconnect:sql:migrate [serviceId]")
-  .description("migrates your CloudSQL database's schema to match your local DataConnect schema")
+  .description("migrate your CloudSQL database's schema to match your local Data Connect schema")
   .before(requirePermissions, [
     "firebasedataconnect.services.list",
     "firebasedataconnect.schemas.list",
     "firebasedataconnect.schemas.update",
     "cloudsql.instances.connect",
-    "cloudsql.users.create",
   ])
   .before(requireAuth)
-  .withForce("Execute any required database changes without prompting")
+  .withForce("execute any required database changes without prompting")
   .action(async (serviceId: string, options: Options) => {
     const projectId = needProjectId(options);
     await ensureApis(projectId);
@@ -35,6 +34,7 @@ export const command = new Command("dataconnect:sql:migrate [serviceId]")
       options,
       schema: serviceInfo.schema,
       validateOnly: true,
+      schemaValidation: serviceInfo.dataConnectYaml.schema.datasource.postgresql?.schemaValidation,
     });
     if (diffs.length) {
       logLabeledSuccess(

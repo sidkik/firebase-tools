@@ -8,6 +8,7 @@ import { parseServiceName } from "../../dataconnect/names";
 import { ResourceFilter } from "../../dataconnect/filters";
 import { vertexAIOrigin } from "../../api";
 import * as ensureApiEnabled from "../../ensureApiEnabled";
+import { confirm } from "../../prompt";
 
 /**
  * Checks for and creates a Firebase DataConnect service, if needed.
@@ -55,28 +56,22 @@ export default async function (
   );
 
   if (servicesToDelete.length) {
-    const warning = `The following services exist on ${projectId} but are not listed in your 'firebase.json'\n${servicesToDelete
-      .map((s) => s.name)
-      .join("\n")}\nConsider deleting these via the Firebase console if they are no longer needed.`;
-    utils.logLabeledWarning("dataconnect", warning);
-    // TODO: Switch this back to prompting for deletion.
-    // if (
-    //   await confirm({
-    //     force: options.force,
-    //     nonInteractive: options.nonInteractive,
-    //     message: `The following services exist on ${projectId} but are not listed in your 'firebase.json'\n${servicesToDelete
-    //       .map((s) => s.name)
-    //       .join("\n")}\nWould you like to delete these services?`,
-    //   })
-    // ) {
-    //   await Promise.all(
-    //     servicesToDelete.map(async (s) => {
-    //       const { projectId, locationId, serviceId } = splitName(s.name);
-    //       await client.deleteService(projectId, locationId, serviceId);
-    //       utils.logLabeledSuccess("dataconnect", `Deleted service ${s.name}`);
-    //     }),
-    //   );
-    // }
+    if (
+      await confirm({
+        force: options.force,
+        nonInteractive: options.nonInteractive,
+        message: `The following services exist on ${projectId} but are not listed in your 'firebase.json'\n${servicesToDelete
+          .map((s) => s.name)
+          .join("\n")}\nWould you like to delete these services?`,
+      })
+    ) {
+      await Promise.all(
+        servicesToDelete.map(async (s) => {
+          await client.deleteService(s.name);
+          utils.logLabeledSuccess("dataconnect", `Deleted service ${s.name}`);
+        }),
+      );
+    }
   }
 
   // Provision CloudSQL resources
@@ -88,21 +83,23 @@ export default async function (
         return !filters || filters?.some((f) => si.dataConnectYaml.serviceId === f.serviceId);
       })
       .map(async (s) => {
-        const instanceId = s.schema.primaryDatasource.postgresql?.cloudSql.instance
-          .split("/")
-          .pop();
-        const databaseId = s.schema.primaryDatasource.postgresql?.database;
-        if (!instanceId || !databaseId) {
-          return Promise.resolve();
+        const postgresDatasource = s.schema.datasources.find((d) => d.postgresql);
+        if (postgresDatasource) {
+          const instanceId = postgresDatasource.postgresql?.cloudSql.instance.split("/").pop();
+          const databaseId = postgresDatasource.postgresql?.database;
+          if (!instanceId || !databaseId) {
+            return Promise.resolve();
+          }
+          const enableGoogleMlIntegration = requiresVector(s.deploymentMetadata);
+          return provisionCloudSql({
+            projectId,
+            location: parseServiceName(s.serviceName).location,
+            instanceId,
+            databaseId,
+            enableGoogleMlIntegration,
+            waitForCreation: true,
+          });
         }
-        const enableGoogleMlIntegration = requiresVector(s.deploymentMetadata);
-        return provisionCloudSql({
-          projectId,
-          locationId: parseServiceName(s.serviceName).location,
-          instanceId,
-          databaseId,
-          enableGoogleMlIntegration,
-        });
       }),
   );
   return;

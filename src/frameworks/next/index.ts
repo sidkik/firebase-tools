@@ -1,12 +1,12 @@
 import { execSync } from "child_process";
-import { spawn, sync as spawnSync } from "cross-spawn";
+import { spawn } from "cross-spawn";
 import { mkdir, copyFile } from "fs/promises";
 import { basename, dirname, join } from "path";
 import type { NextConfig } from "next";
 import type { PrerenderManifest } from "next/dist/build";
 import type { DomainLocale } from "next/dist/server/config";
 import type { PagesManifest } from "next/dist/build/webpack/plugins/pages-manifest-plugin";
-import { copy, mkdirp, pathExists, pathExistsSync } from "fs-extra";
+import { copy, mkdirp, pathExists, pathExistsSync, readFile } from "fs-extra";
 import { pathToFileURL, parse } from "url";
 import { gte } from "semver";
 import { IncomingMessage, ServerResponse } from "http";
@@ -17,7 +17,7 @@ import { pick } from "stream-json/filters/Pick";
 import { streamObject } from "stream-json/streamers/StreamObject";
 import { fileExistsSync } from "../../fsutils";
 
-import { promptOnce } from "../../prompt";
+import { select } from "../../prompt";
 import { FirebaseError } from "../../error";
 import type { EmulatorInfo } from "../../emulator/types";
 import {
@@ -49,13 +49,15 @@ import {
   getMiddlewareMatcherRegexes,
   getNonStaticRoutes,
   getNonStaticServerComponents,
-  getHeadersFromMetaFiles,
+  getAppMetadataFromMetaFiles,
   cleanI18n,
   getNextVersion,
   hasStaticAppNotFoundComponent,
   getRoutesWithServerAction,
   getProductionDistDirFiles,
   whichNextConfigFile,
+  installEsbuild,
+  findEsbuildPath,
 } from "./utils";
 import { NODE_VERSION, NPM_COMMAND_TIMEOUT_MILLIES, SHARP_VERSION, I18N_ROOT } from "../constants";
 import type {
@@ -66,6 +68,7 @@ import type {
   NpmLsDepdendency,
   MiddlewareManifest,
   ActionManifest,
+  CustomBuildOptions,
 } from "./interfaces";
 import {
   MIDDLEWARE_MANIFEST,
@@ -74,23 +77,23 @@ import {
   ROUTES_MANIFEST,
   APP_PATH_ROUTES_MANIFEST,
   APP_PATHS_MANIFEST,
-  ESBUILD_VERSION,
   SERVER_REFERENCE_MANIFEST,
+  ESBUILD_VERSION,
 } from "./constants";
 import { getAllSiteDomains, getDeploymentDomain } from "../../hosting/api";
 import { logger } from "../../logger";
+import { parseStrict } from "../../functions/env";
 
 const DEFAULT_BUILD_SCRIPT = ["next build"];
 const PUBLIC_DIR = "public";
 
-export const supportedRange = "12 - 14.0";
+export const supportedRange = "12 - 15.0";
 
 export const name = "Next.js";
 export const support = SupportLevel.Preview;
 export const type = FrameworkType.MetaFramework;
 export const docsUrl = "https://firebase.google.com/docs/hosting/frameworks/nextjs";
 
-const BUNDLE_NEXT_CONFIG_TIMEOUT = 60_000;
 const DEFAULT_NUMBER_OF_REASONS_TO_LIST = 5;
 
 function getReactVersion(cwd: string): string | undefined {
@@ -124,7 +127,19 @@ export async function build(
     process.env.__NEXT_REACT_ROOT = "true";
   }
 
-  const env = { ...process.env };
+  let env = { ...process.env };
+
+  // Check if the .env.<PROJECT-ID> file exists and make it available for the build process
+  if (context?.projectId) {
+    const projectEnvPath = join(dir, `.env.${context.projectId}`);
+
+    if (await pathExists(projectEnvPath)) {
+      const projectEnvVars = parseStrict((await readFile(projectEnvPath)).toString());
+
+      // Merge the parsed variables with the existing environment variables
+      env = { ...projectEnvVars, ...env };
+    }
+  }
 
   if (context?.projectId && context?.site) {
     const deploymentDomain = await getDeploymentDomain(
@@ -237,13 +252,17 @@ export async function build(
   ]);
 
   if (appPathRoutesManifest) {
-    const headersFromMetaFiles = await getHeadersFromMetaFiles(
+    const { headers: headersFromMetaFiles, pprRoutes } = await getAppMetadataFromMetaFiles(
       dir,
       distDir,
       baseUrl,
       appPathRoutesManifest,
     );
     headers.push(...headersFromMetaFiles);
+
+    for (const route of pprRoutes) {
+      reasonsForBackend.add(`route with PPR ${route}`);
+    }
 
     if (appPathsManifest) {
       const unrenderedServerComponents = getNonStaticServerComponents(
@@ -358,16 +377,17 @@ export async function build(
  * Utility method used during project initialization.
  */
 export async function init(setup: any, config: any) {
-  const language = await promptOnce({
-    type: "list",
+  const language = await select<string>({
     default: "TypeScript",
     message: "What language would you like to use?",
-    choices: ["JavaScript", "TypeScript"],
+    choices: [
+      { name: "JavaScript", value: "js" },
+      { name: "TypeScript", value: "ts" },
+    ],
   });
   execSync(
-    `npx --yes create-next-app@"${supportedRange}" -e hello-world ${
-      setup.hosting.source
-    } --use-npm ${language === "TypeScript" ? "--ts" : "--js"}`,
+    `npx --yes create-next-app@"${supportedRange}" -e hello-world ` +
+      `${setup.hosting.source} --use-npm --${language}`,
     { stdio: "inherit", cwd: config.projectDir },
   );
 }
@@ -472,6 +492,13 @@ export async function ɵcodegenPublicDirectory(
     ...pagesManifestLikePrerender,
   };
 
+  const { pprRoutes } = await getAppMetadataFromMetaFiles(
+    sourceDir,
+    distDir,
+    basePath,
+    appPathRoutesManifest,
+  );
+
   await Promise.all(
     Object.entries(routesToCopy).map(async ([path, route]) => {
       if (route.initialRevalidateSeconds) {
@@ -489,7 +516,6 @@ export async function ɵcodegenPublicDirectory(
         logger.debug(`skipping ${path} due to server action`);
         return;
       }
-
       const appPathRoute =
         route.srcRoute && appPathRoutesEntries.find(([, it]) => it === route.srcRoute)?.[0];
       const contentDist = join(sourceDir, distDir, "server", appPathRoute ? "app" : "pages");
@@ -521,6 +547,12 @@ export async function ɵcodegenPublicDirectory(
       let defaultDestPath = isDefaultLocale && join(destDir, basePath, ...destPartsOrIndex);
       if (!fileExistsSync(sourcePath) && fileExistsSync(`${sourcePath}.html`)) {
         sourcePath += ".html";
+
+        if (pprRoutes.includes(path)) {
+          logger.debug(`skipping ${path} due to ppr`);
+          return;
+        }
+
         if (localizedDestPath) localizedDestPath += ".html";
         if (defaultDestPath) defaultDestPath += ".html";
       } else if (
@@ -572,6 +604,23 @@ export async function ɵcodegenFunctionsDirectory(
   const configFile = await whichNextConfigFile(sourceDir);
   if (configFile) {
     try {
+      // Check if esbuild is installed using `npx which`, if not, install it
+      let esbuildPath = findEsbuildPath();
+      if (!esbuildPath || !pathExistsSync(esbuildPath)) {
+        console.warn("esbuild not found, installing...");
+        installEsbuild(ESBUILD_VERSION);
+        esbuildPath = findEsbuildPath();
+        if (!esbuildPath || !pathExistsSync(esbuildPath)) {
+          throw new FirebaseError("Failed to locate esbuild after installation.");
+        }
+      }
+
+      // Dynamically require esbuild from the found path
+      const esbuild = require(esbuildPath);
+      if (!esbuild) {
+        throw new FirebaseError(`Failed to load esbuild from path: ${esbuildPath}`);
+      }
+
       const productionDeps = await new Promise<string[]>((resolve) => {
         const dependencies: string[] = [];
         const npmLs = spawn("npm", ["ls", "--omit=dev", "--all", "--json=true"], {
@@ -593,29 +642,27 @@ export async function ɵcodegenFunctionsDirectory(
           resolve([...new Set(dependencies)]);
         });
       });
+
       // Mark all production deps as externals, so they aren't bundled
       // DevDeps won't be included in the Cloud Function, so they should be bundled
-      const esbuildArgs = productionDeps
-        .map((it) => `--external:${it}`)
-        .concat("--bundle", "--platform=node", `--target=node${NODE_VERSION}`, "--log-level=error");
-
+      const esbuildArgs: CustomBuildOptions = {
+        entryPoints: [join(sourceDir, configFile)],
+        outfile: join(destDir, configFile),
+        bundle: true,
+        platform: "node",
+        target: `node${NODE_VERSION}`,
+        logLevel: "error",
+        external: productionDeps,
+      };
       if (configFile === "next.config.mjs") {
         // ensure generated file is .mjs if the config is .mjs
-        esbuildArgs.push(...[`--outfile=${join(destDir, configFile)}`, "--format=esm"]);
-      } else {
-        esbuildArgs.push(`--outfile=${join(destDir, configFile)}`);
+        esbuildArgs.format = "esm";
       }
 
-      const bundle = spawnSync(
-        "npx",
-        ["--yes", `esbuild@${ESBUILD_VERSION}`, configFile, ...esbuildArgs],
-        {
-          cwd: sourceDir,
-          timeout: BUNDLE_NEXT_CONFIG_TIMEOUT,
-        },
-      );
-      if (bundle.status !== 0) {
-        throw new FirebaseError(bundle.stderr.toString());
+      const bundle = await esbuild.build(esbuildArgs);
+
+      if (bundle.errors && bundle.errors.length > 0) {
+        throw new FirebaseError(bundle.errors.toString());
       }
     } catch (e: any) {
       console.warn(

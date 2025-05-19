@@ -4,7 +4,7 @@ import * as utils from "../../utils";
 import { Runtime } from "./runtimes/supported";
 import { FirebaseError } from "../../error";
 import { Context } from "./args";
-import { flattenArray } from "../../functional";
+import { assertExhaustive, flattenArray } from "../../functional";
 
 /** Retry settings for a ScheduleSpec. */
 export interface ScheduleRetryConfig {
@@ -41,7 +41,9 @@ export interface HttpsTriggered {
 }
 
 /** API agnostic version of a Firebase callable function. */
-export type CallableTrigger = Record<string, never>;
+export type CallableTrigger = {
+  genkitAction?: string;
+};
 
 /** Something that has a callable trigger */
 export interface CallableTriggered {
@@ -135,6 +137,7 @@ export interface BlockingTrigger {
   eventType: string;
   options?: Record<string, unknown>;
 }
+
 export interface BlockingTriggered {
   blockingTrigger: BlockingTrigger;
 }
@@ -153,9 +156,8 @@ export function endpointTriggerType(endpoint: Endpoint): string {
     return "taskQueue";
   } else if (isBlockingTriggered(endpoint)) {
     return endpoint.blockingTrigger.eventType;
-  } else {
-    throw new Error("Unexpected trigger type for endpoint " + JSON.stringify(endpoint));
   }
+  assertExhaustive(endpoint);
 }
 
 // TODO(inlined): Enum types should be singularly named
@@ -339,6 +341,8 @@ export function isBlockingTriggered(triggered: Triggered): triggered is Blocking
   return {}.hasOwnProperty.call(triggered, "blockingTrigger");
 }
 
+export type EndpointState = "ACTIVE" | "FAILED" | "DEPLOYING" | "DELETING" | "UNKONWN";
+
 /**
  * An endpoint that serves traffic to a stack of services.
  * For now, this is always a Cloud Function. Future iterations may use complex
@@ -379,6 +383,9 @@ export type Endpoint = TargetIds &
     // This may eventually be different than id because GCF is going to start
     // doing name translations
     runServiceId?: string;
+
+    // State of the endpoint.
+    state?: EndpointState;
   };
 
 export interface RequiredAPI {

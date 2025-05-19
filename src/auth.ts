@@ -1,20 +1,17 @@
 import * as clc from "colorette";
 import * as FormData from "form-data";
-import * as fs from "fs";
 import * as http from "http";
 import * as jwt from "jsonwebtoken";
 import * as opn from "open";
-import * as path from "path";
 import * as portfinder from "portfinder";
 import * as url from "url";
-import * as util from "util";
 
 import * as apiv2 from "./apiv2";
 import { configstore } from "./configstore";
-import { FirebaseError } from "./error";
+import { FirebaseError, getErrMsg } from "./error";
 import * as utils from "./utils";
 import { logger } from "./logger";
-import { promptOnce } from "./prompt";
+import { input } from "./prompt";
 import * as scopes from "./scopes";
 import { clearCredentials } from "./defaultCredentials";
 import { v4 as uuidv4 } from "uuid";
@@ -40,6 +37,8 @@ import {
   GitHubAuthResponse,
   UserCredentials,
 } from "./types/auth";
+import { readTemplate } from "./templates";
+import { refreshAuth } from "./requireAuth";
 
 portfinder.setBasePort(9005);
 
@@ -104,6 +103,23 @@ export function getAllAccounts(): Account[] {
   res.push(...getAdditionalAccounts());
 
   return res;
+}
+
+/**
+ * Throw an error if the provided email is not a signed-in user.
+ */
+export function assertAccount(email: string, options?: { mcp?: boolean }) {
+  const allAccounts = getAllAccounts();
+  const accountExists = allAccounts.some((a) => a.user.email === email);
+  if (!accountExists) {
+    throw new FirebaseError(
+      `Account ${email} does not exist, ${
+        options?.mcp
+          ? `use the 'firebase_get_environment' tool to see available accounts or instruct the user to use the 'firebase login:add' terminal command to add a new account.`
+          : `run "${clc.bold("firebase login:list")} to see valid accounts`
+      }`,
+    );
+  }
 }
 
 /**
@@ -211,7 +227,19 @@ export function setProjectAccount(projectDir: string, email: string) {
 /**
  * Set the global default account.
  */
-export function setGlobalDefaultAccount(account: Account) {
+export function setGlobalDefaultAccount(accountOrEmail: string | Account) {
+  let account: Account;
+  if (typeof accountOrEmail === "string") {
+    const accountFromEmail = getAllAccounts().find((acc) => acc.user.email === accountOrEmail)!;
+    if (!accountFromEmail)
+      throw new FirebaseError(
+        `Account '${accountOrEmail}' is not a signed-in user on this device.`,
+      );
+    account = accountFromEmail;
+  } else {
+    account = accountOrEmail;
+  }
+
   configstore.set("user", account.user);
   configstore.set("tokens", account.tokens);
 
@@ -231,14 +259,14 @@ function open(url: string): void {
 
 // Always create a new error so that the stack is useful
 function invalidCredentialError(): FirebaseError {
-  return new FirebaseError(
+  const message =
     "Authentication Error: Your credentials are no longer valid. Please run " +
-      clc.bold("firebase login --reauth") +
-      "\n\n" +
-      "For CI servers and headless environments, generate a new token with " +
-      clc.bold("firebase login:ci"),
-    { exit: 1 },
-  );
+    clc.bold("firebase login --reauth") +
+    "\n\n" +
+    "For CI servers and headless environments, generate a new token with " +
+    clc.bold("firebase login:ci");
+  logger.error(message);
+  return new FirebaseError(message, { exit: 1 });
 }
 
 const FIFTEEN_MINUTES_IN_MS = 15 * 60 * 1000;
@@ -319,7 +347,7 @@ async function getTokensFromAuthorizationCode(
       headers: form.getHeaders(),
       skipLog: { body: true, queryParams: true, resBody: true },
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     if (err instanceof Error) {
       logger.debug("Token Fetch Error:", err.stack || "");
     } else {
@@ -379,18 +407,17 @@ async function getGithubTokensFromAuthorizationCode(code: string, callbackUrl: s
   return res.body.access_token;
 }
 
-async function respondWithFile(
+function respondHtml(
   req: http.IncomingMessage,
   res: http.ServerResponse,
   statusCode: number,
-  filename: string,
-) {
-  const response = await util.promisify(fs.readFile)(path.join(__dirname, filename));
+  html: string,
+): void {
   res.writeHead(statusCode, {
-    "Content-Length": response.length,
+    "Content-Length": html.length,
     "Content-Type": "text/html",
   });
-  res.end(response);
+  res.end(html);
   req.socket.destroy();
 }
 
@@ -431,10 +458,7 @@ async function loginRemotely(): Promise<UserCredentials> {
   logger.info("3. Paste or enter the authorization code below once you have it:");
   logger.info();
 
-  const code = await promptOnce({
-    type: "input",
-    message: "Enter authorization code:",
-  });
+  const code = await input({ message: "Enter authorization code:" });
 
   try {
     const tokens = await getTokensFromAuthorizationCode(
@@ -458,12 +482,12 @@ async function loginRemotely(): Promise<UserCredentials> {
 async function loginWithLocalhostGoogle(port: number, userHint?: string): Promise<UserCredentials> {
   const callbackUrl = getCallbackUrl(port);
   const authUrl = getLoginUrl(callbackUrl, userHint);
-  const successTemplate = "../templates/loginSuccess.html";
+  const successHtml = await readTemplate("loginSuccess.html");
   const tokens = await loginWithLocalhost(
     port,
     callbackUrl,
     authUrl,
-    successTemplate,
+    successHtml,
     getTokensFromAuthorizationCode,
   );
 
@@ -480,12 +504,12 @@ async function loginWithLocalhostGoogle(port: number, userHint?: string): Promis
 async function loginWithLocalhostGitHub(port: number): Promise<string> {
   const callbackUrl = getCallbackUrl(port);
   const authUrl = getGithubLoginUrl(callbackUrl);
-  const successTemplate = "../templates/loginSuccessGithub.html";
+  const successHtml = await readTemplate("loginSuccessGithub.html");
   const tokens = await loginWithLocalhost(
     port,
     callbackUrl,
     authUrl,
-    successTemplate,
+    successHtml,
     getGithubTokensFromAuthorizationCode,
   );
   void trackGA4("login", { method: "github_localhost" });
@@ -496,7 +520,7 @@ async function loginWithLocalhost<ResultType>(
   port: number,
   callbackUrl: string,
   authUrl: string,
-  successTemplate: string,
+  successHtml: string,
   getTokens: (queryCode: string, callbackUrl: string) => Promise<ResultType>,
 ): Promise<ResultType> {
   return new Promise<ResultType>((resolve, reject) => {
@@ -506,7 +530,8 @@ async function loginWithLocalhost<ResultType>(
       const queryCode = query.code;
 
       if (queryState !== _nonce || typeof queryCode !== "string") {
-        await respondWithFile(req, res, 400, "../templates/loginFailure.html");
+        const html = await readTemplate("loginFailure.html");
+        respondHtml(req, res, 400, html);
         reject(new FirebaseError("Unexpected error while logging in"));
         server.close();
         return;
@@ -514,10 +539,11 @@ async function loginWithLocalhost<ResultType>(
 
       try {
         const tokens = await getTokens(queryCode, callbackUrl);
-        await respondWithFile(req, res, 200, successTemplate);
+        respondHtml(req, res, 200, successHtml);
         resolve(tokens);
-      } catch (err: any) {
-        await respondWithFile(req, res, 400, "../templates/loginFailure.html");
+      } catch (err: unknown) {
+        const html = await readTemplate("loginFailure.html");
+        respondHtml(req, res, 400, html);
         reject(err);
       }
       server.close();
@@ -561,7 +587,20 @@ export function findAccountByEmail(email: string): Account | undefined {
   return getAllAccounts().find((a) => a.user.email === email);
 }
 
-function haveValidTokens(refreshToken: string, authScopes: string[]) {
+export function loggedIn() {
+  return !!lastAccessToken;
+}
+
+export function isExpired(tokens: Tokens | undefined): boolean {
+  const hasExpiration = (p: any): p is TokensWithExpiration => !!p.expires_at;
+  if (hasExpiration(tokens)) {
+    return !(tokens && tokens.expires_at && tokens.expires_at > Date.now());
+  } else {
+    return !tokens;
+  }
+}
+
+export function haveValidTokens(refreshToken: string, authScopes: string[]) {
   if (!lastAccessToken?.access_token) {
     const tokens = configstore.get("tokens");
     if (refreshToken === tokens?.refresh_token) {
@@ -575,9 +614,16 @@ function haveValidTokens(refreshToken: string, authScopes: string[]) {
   const hasSameScopes = oldScopesJSON === newScopesJSON;
   // To avoid token expiration in the middle of a long process we only hand out
   // tokens if they have a _long_ time before the server rejects them.
-  const isExpired = (lastAccessToken?.expires_at || 0) < Date.now() + FIFTEEN_MINUTES_IN_MS;
-
-  return hasTokens && hasSameScopes && !isExpired;
+  const expired = (lastAccessToken?.expires_at || 0) < Date.now() + FIFTEEN_MINUTES_IN_MS;
+  const valid = hasTokens && hasSameScopes && !expired;
+  if (hasTokens) {
+    logger.debug(
+      `Checked if tokens are valid: ${valid}, expires at: ${lastAccessToken?.expires_at}`,
+    );
+  } else {
+    logger.debug("No OAuth tokens found");
+  }
+  return valid;
 }
 
 function deleteAccount(account: Account) {
@@ -714,7 +760,16 @@ export async function getAccessToken(refreshToken: string, authScopes: string[])
   if (haveValidTokens(refreshToken, authScopes) && lastAccessToken) {
     return lastAccessToken;
   }
-  return refreshTokens(refreshToken, authScopes);
+  if (refreshToken) {
+    return refreshTokens(refreshToken, authScopes);
+  } else {
+    try {
+      return refreshAuth();
+    } catch (err: unknown) {
+      logger.debug(`Unable to refresh token: ${getErrMsg(err)}`);
+    }
+    throw new FirebaseError("Unable to getAccessToken");
+  }
 }
 
 export async function logout(refreshToken: string) {

@@ -7,7 +7,7 @@ import * as deploymentTool from "../deploymentTool";
 import { FirebaseError } from "../error";
 import { DeepOmit, RecursiveKeyOf, assertImplements } from "../metaprogramming";
 
-export const API_VERSION = "v1alpha";
+export const API_VERSION = "v1beta";
 
 export const client = new Client({
   urlPrefix: apphostingOrigin(),
@@ -34,7 +34,7 @@ export type ServingLocality = "GLOBAL_ACCESS" | "REGIONAL_STRICT";
 export interface Backend {
   name: string;
   mode?: string;
-  codebase: Codebase;
+  codebase?: Codebase;
   servingLocality: ServingLocality;
   labels: Record<string, string>;
   createTime: string;
@@ -100,7 +100,8 @@ export interface BuildConfig {
 }
 
 interface BuildSource {
-  codebase: CodebaseSource;
+  codebase?: CodebaseSource;
+  archive?: ArchiveSource;
 }
 
 interface CodebaseSource {
@@ -114,6 +115,21 @@ interface CodebaseSource {
   commitMessage: string;
   uri: string;
   commitTime: string;
+}
+
+interface ArchiveSource {
+  // oneof reference
+  userStorageUri?: string;
+  externalSignedUri?: string;
+  // end oneof reference
+  rootDirectory?: string;
+  author?: SourceUserMetadata;
+}
+
+interface SourceUserMetadata {
+  displayName: string;
+  email: string;
+  imageUri: string;
 }
 
 interface Status {
@@ -139,7 +155,6 @@ export interface Rollout {
   pauseTime: string;
   error?: Error;
   build: string;
-  stages?: RolloutStage[];
   displayName?: string;
   createTime: string;
   updateTime: string;
@@ -193,9 +208,7 @@ export type TrafficOutputOnlyFields =
   | "updateTime"
   | "etag"
   | "uid"
-  | "rolloutPolicy.disabledTime"
-  | "rolloutPolicy.stages.startTime"
-  | "rolloutPolicy.stages.endTime";
+  | "rolloutPolicy.disabledTime";
 
 assertImplements<TrafficOutputOnlyFields, RecursiveKeyOf<Traffic>>();
 
@@ -213,7 +226,6 @@ export interface RolloutPolicy {
   codebaseBranch?: string;
   codebaseTagPattern?: string;
   // end oneof trigger
-  stages?: RolloutStage[];
   disabled?: boolean;
 
   // TODO: This will be undefined if disabled is not true, right?

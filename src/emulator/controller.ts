@@ -51,12 +51,18 @@ import { Runtime, isRuntime } from "../deploy/functions/runtimes/supported";
 import { AuthEmulator, SingleProjectMode } from "./auth";
 import { DatabaseEmulator, DatabaseEmulatorArgs } from "./databaseEmulator";
 import { EventarcEmulator } from "./eventarcEmulator";
-import { DataConnectEmulator } from "./dataconnectEmulator";
+import { DataConnectEmulator, DataConnectEmulatorArgs } from "./dataconnectEmulator";
 import { FirestoreEmulator, FirestoreEmulatorArgs } from "./firestoreEmulator";
 import { HostingEmulator } from "./hostingEmulator";
 import { PubsubEmulator } from "./pubsubEmulator";
 import { StorageEmulator } from "./storage";
 import { readFirebaseJson } from "../dataconnect/fileUtils";
+import { TasksEmulator } from "./tasksEmulator";
+import { AppHostingEmulator } from "./apphosting";
+import { sendVSCodeMessage, VSCODE_MESSAGE } from "../dataconnect/webhook";
+import { dataConnectLocalConnString } from "../api";
+import { AppHostingSingle } from "../firebaseConfig";
+import { resolveProjectPath } from "../projectPath";
 
 const START_LOGGING_EMULATOR = utils.envOverride(
   "START_LOGGING_EMULATOR",
@@ -68,8 +74,9 @@ const START_LOGGING_EMULATOR = utils.envOverride(
  * Exports emulator data on clean exit (SIGINT or process end)
  * @param options
  */
-export async function exportOnExit(options: any) {
-  const exportOnExitDir = options.exportOnExit;
+export async function exportOnExit(options: Options): Promise<void> {
+  // Note: options.exportOnExit is coerced to a string before this point in commandUtils.ts#setExportOnExitOptions
+  const exportOnExitDir = options.exportOnExit as string;
   if (exportOnExitDir) {
     try {
       utils.logBullet(
@@ -77,8 +84,8 @@ export async function exportOnExit(options: any) {
           "please wait for the export to finish...",
       );
       await exportEmulatorData(exportOnExitDir, options, /* initiatedBy= */ "exit");
-    } catch (e: any) {
-      utils.logWarning(e);
+    } catch (e: unknown) {
+      utils.logWarning(`${e}`);
       utils.logWarning(`Automatic export to "${exportOnExitDir}" failed, going to exit now...`);
     }
   }
@@ -103,6 +110,7 @@ export async function cleanShutdown(): Promise<void> {
     "Shutting down emulators.",
   );
   await EmulatorRegistry.stopAll();
+  await sendVSCodeMessage({ message: VSCODE_MESSAGE.EMULATORS_SHUTDOWN });
 }
 
 /**
@@ -115,6 +123,11 @@ export function filterEmulatorTargets(options: { only: string; config: any }): E
   targets = targets.filter((e) => {
     return options.config.has(e) || options.config.has(`emulators.${e}`);
   });
+
+  // Extensions may not be initialized but we can have SDK defined extensions
+  if (targets.includes(Emulators.FUNCTIONS) && !targets.includes(Emulators.EXTENSIONS)) {
+    targets.push(Emulators.EXTENSIONS);
+  }
 
   const onlyOptions: string = options.only;
   if (onlyOptions) {
@@ -343,11 +356,24 @@ export async function startAll(
   // the Functions emulator needs to start.
   let extensionEmulator: ExtensionsEmulator | undefined = undefined;
   if (shouldStart(options, Emulators.EXTENSIONS)) {
-    const projectNumber = isDemoProject
-      ? Constants.FAKE_PROJECT_NUMBER
-      : await needProjectNumber(options);
+    let projectNumber = Constants.FAKE_PROJECT_NUMBER;
+    if (!isDemoProject) {
+      try {
+        projectNumber = await needProjectNumber(options);
+      } catch (err: any) {
+        EmulatorLogger.forEmulator(Emulators.EXTENSIONS).logLabeled(
+          "ERROR",
+          Emulators.EXTENSIONS,
+          `Unable to look up project number for ${options.project}.\n` +
+            " If this is a real project, ensure that you are logged in and have access to it.\n" +
+            " If this is a fake project, please use a project ID starting with 'demo-' to skip production calls.\n" +
+            " Continuing with a fake project number - secrets and other features that require production access may behave unexpectedly.",
+        );
+      }
+    }
     const aliases = getAliases(options, projectId);
     extensionEmulator = new ExtensionsEmulator({
+      options,
       projectId,
       projectDir: options.config.projectDir,
       projectNumber,
@@ -355,10 +381,8 @@ export async function startAll(
       extensions: options.config.get("extensions"),
     });
     const extensionsBackends = await extensionEmulator.getExtensionBackends();
-    const filteredExtensionsBackends = extensionEmulator.filterUnemulatedTriggers(
-      options,
-      extensionsBackends,
-    );
+    const filteredExtensionsBackends =
+      extensionEmulator.filterUnemulatedTriggers(extensionsBackends);
     emulatableBackends.push(...filteredExtensionsBackends);
     trackGA4("extensions_emulated", {
       number_of_extensions_emulated: filteredExtensionsBackends.length,
@@ -371,11 +395,13 @@ export async function startAll(
     // If we already know we need Functions (and Eventarc), assign them now.
     listenConfig[Emulators.FUNCTIONS] = getListenConfig(options, Emulators.FUNCTIONS);
     listenConfig[Emulators.EVENTARC] = getListenConfig(options, Emulators.EVENTARC);
+    listenConfig[Emulators.TASKS] = getListenConfig(options, Emulators.TASKS);
   }
   for (const emulator of ALL_EMULATORS) {
     if (
       emulator === Emulators.FUNCTIONS ||
       emulator === Emulators.EVENTARC ||
+      emulator === Emulators.TASKS ||
       // Same port as Functions, no need for separate assignment
       emulator === Emulators.EXTENSIONS ||
       (emulator === Emulators.UI && !showUI)
@@ -395,6 +421,14 @@ export async function startAll(
           host: config.host,
           port: wsPortConfig || 9150,
           portFixed: !!wsPortConfig,
+        };
+      }
+      if (emulator === Emulators.DATACONNECT && !dataConnectLocalConnString()) {
+        const pglitePortConfig = options.config.src.emulators?.dataconnect?.postgresPort;
+        listenConfig["dataconnect.postgres"] = {
+          host: config.host,
+          port: pglitePortConfig || 5432,
+          portFixed: !!pglitePortConfig,
         };
       }
     }
@@ -517,6 +551,7 @@ export async function startAll(
         // TODO(b/213335255): predefinedTriggers and nodeMajorVersion are here to support ext:dev:emulators:* commands.
         // Ideally, we should handle that case via ExtensionEmulator.
         predefinedTriggers: options.extDevTriggers as ParsedTriggerDefinition[] | undefined,
+        ignore: cfg.ignore,
       });
     }
   }
@@ -526,12 +561,13 @@ export async function startAll(
   }
 
   if (emulatableBackends.length) {
-    if (!listenForEmulator.functions || !listenForEmulator.eventarc) {
+    if (!listenForEmulator.functions || !listenForEmulator.eventarc || !listenForEmulator.tasks) {
       // We did not know that we need Functions and Eventarc earlier but now we do.
       listenForEmulator = await resolveHostAndAssignPorts({
         ...listenForEmulator,
         functions: listenForEmulator.functions ?? getListenConfig(options, Emulators.FUNCTIONS),
         eventarc: listenForEmulator.eventarc ?? getListenConfig(options, Emulators.EVENTARC),
+        tasks: listenForEmulator.eventarc ?? getListenConfig(options, Emulators.TASKS),
       });
       hubLogger.log("DEBUG", "late-assigned ports for functions and eventarc emulators", {
         user: listenForEmulator,
@@ -578,6 +614,7 @@ export async function startAll(
       debugPort: inspectFunctions,
       verbosity: options.logVerbosity,
       projectAlias: options.projectAlias,
+      extensionsEmulator: extensionEmulator,
     });
     await startEmulator(functionsEmulator);
 
@@ -587,6 +624,14 @@ export async function startAll(
       port: eventarcAddr.port,
     });
     await startEmulator(eventarcEmulator);
+
+    const tasksAddr = legacyGetFirstAddr(Emulators.TASKS);
+    const tasksEmulator = new TasksEmulator({
+      host: tasksAddr.host,
+      port: tasksAddr.port,
+    });
+
+    await startEmulator(tasksEmulator);
   }
 
   if (listenForEmulator.firestore) {
@@ -829,19 +874,61 @@ export async function startAll(
         `TODO: Add support for multiple services in the Data Connect emulator. Currently emulating first service ${config[0].source}`,
       );
     }
-    let configDir = config[0].source;
-    if (!path.isAbsolute(configDir)) {
-      const cwd = options.cwd || process.cwd();
-      configDir = path.resolve(path.join(cwd), configDir);
-    }
-    const dataConnectEmulator = new DataConnectEmulator({
+
+    const args: DataConnectEmulatorArgs = {
       listen: listenForEmulator.dataconnect,
       projectId,
       auto_download: true,
-      configDir,
-      locationId: config[0].location,
+      configDir: config[0].source,
       rc: options.rc,
-    });
+      config: options.config,
+      autoconnectToPostgres: true,
+      postgresListen: listenForEmulator["dataconnect.postgres"],
+      enable_output_generated_sdk: true, // TODO: source from arguments
+      enable_output_schema_extensions: true,
+      debug: options.debug,
+    };
+
+    if (exportMetadata.dataconnect) {
+      utils.assertIsString(options.import);
+      const importDirAbsPath = path.resolve(options.import);
+      const exportMetadataFilePath = path.resolve(
+        importDirAbsPath,
+        exportMetadata.dataconnect.path,
+      );
+      const dataDirectory = options.config.get("emulators.dataconnect.dataDir");
+      if (exportMetadataFilePath && dataDirectory) {
+        EmulatorLogger.forEmulator(Emulators.DATACONNECT).logLabeled(
+          "WARN",
+          "dataconnect",
+          "'firebase.json#emulators.dataconnect.dataDir' is set and `--import` flag was passed. " +
+            "This will overwrite any data saved from previous runs.",
+        );
+        if (
+          !options.nonInteractive &&
+          !(await confirm({
+            message: `Do you wish to continue and overwrite data in ${dataDirectory}?`,
+            default: false,
+          }))
+        ) {
+          await cleanShutdown();
+          throw new FirebaseError("Command aborted");
+        }
+      }
+
+      EmulatorLogger.forEmulator(Emulators.DATACONNECT).logLabeled(
+        "BULLET",
+        "dataconnect",
+        `Importing data from ${exportMetadataFilePath}`,
+      );
+      args.importPath = exportMetadataFilePath;
+      void trackEmulator("emulator_import", {
+        initiated_by: "start",
+        emulator_name: Emulators.DATACONNECT,
+      });
+    }
+
+    const dataConnectEmulator = new DataConnectEmulator(args);
     await startEmulator(dataConnectEmulator);
   }
 
@@ -877,6 +964,55 @@ export async function startAll(
     await startEmulator(hostingEmulator);
   }
 
+  /**
+   * Similar to the Hosting emulator, the App Hosting emulator should also
+   * start after the other emulators. This is because the service running on
+   * app hosting emulator may depend on other emulators (i.e auth, firestore,
+   * storage, etc).
+   */
+  const apphostingEmulatorConfig = options.config.src.emulators?.[Emulators.APPHOSTING];
+
+  if (listenForEmulator.apphosting) {
+    const rootDirectory = apphostingEmulatorConfig?.rootDirectory;
+    const backendRoot = resolveProjectPath({}, rootDirectory ?? "./");
+
+    // It doesn't seem as though App Hosting emulator supports multiple backends, infer the correct one
+    // from the root directory.
+    let apphostingConfig: AppHostingSingle | undefined;
+    if (Array.isArray(options.config.src.apphosting)) {
+      const matchingAppHostingConfig = options.config.src.apphosting.filter(
+        (config) => resolveProjectPath({}, path.join(".", config.rootDir ?? "/")) === backendRoot,
+      );
+      if (matchingAppHostingConfig.length === 1) {
+        apphostingConfig = matchingAppHostingConfig[0];
+      }
+    } else {
+      apphostingConfig = options.config.src.apphosting;
+    }
+
+    const apphostingAddr = legacyGetFirstAddr(Emulators.APPHOSTING);
+    if (apphostingEmulatorConfig?.startCommandOverride) {
+      const apphostingLogger = EmulatorLogger.forEmulator(Emulators.APPHOSTING);
+      apphostingLogger.logLabeled(
+        "WARN",
+        Emulators.APPHOSTING,
+        "The `firebase.json#emulators.apphosting.startCommandOverride` config is deprecated, please use `firebase.json#emulators.apphosting.startCommand` to set a custom start command instead",
+      );
+    }
+    const apphostingEmulator = new AppHostingEmulator({
+      projectId: options.project,
+      backendId: apphostingConfig?.backendId,
+      host: apphostingAddr.host,
+      port: apphostingAddr.port,
+      startCommand:
+        apphostingEmulatorConfig?.startCommand || apphostingEmulatorConfig?.startCommandOverride,
+      rootDirectory,
+      options,
+    });
+
+    await startEmulator(apphostingEmulator);
+  }
+
   if (listenForEmulator.logging) {
     const loggingAddr = legacyGetFirstAddr(Emulators.LOGGING);
     const loggingEmulator = new LoggingEmulator({
@@ -900,7 +1036,6 @@ export async function startAll(
   if (listenForEmulator.ui) {
     const ui = new EmulatorUI({
       projectId: projectId,
-      auto_download: true,
       listen: listenForEmulator[Emulators.UI],
     });
     await startEmulator(ui);

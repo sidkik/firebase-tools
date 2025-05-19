@@ -1,7 +1,12 @@
-import { Client } from "../../apiv2";
+import { Client, ClientResponse } from "../../apiv2";
 import { cloudSQLAdminOrigin } from "../../api";
 import * as operationPoller from "../../operation-poller";
 import { Instance, Database, User, UserType, DatabaseFlag } from "./types";
+import { needProjectId } from "../../projectUtils";
+import { Options } from "../../options";
+import { logger } from "../../logger";
+import { testIamPermissions } from "../iam";
+import { FirebaseError } from "../../error";
 const API_VERSION = "v1";
 
 const client = new Client({
@@ -15,6 +20,24 @@ interface Operation {
   name: string;
 }
 
+export async function iamUserIsCSQLAdmin(options: Options): Promise<boolean> {
+  const projectId = needProjectId(options);
+  const requiredPermissions = [
+    "cloudsql.instances.connect",
+    "cloudsql.instances.get",
+    "cloudsql.users.create",
+    "cloudsql.users.update",
+  ];
+
+  try {
+    const iamResult = await testIamPermissions(projectId, requiredPermissions);
+    return iamResult.passed;
+  } catch (err: any) {
+    logger.debug(`[iam] error while checking permissions, command may fail: ${err}`);
+    return false;
+  }
+}
+
 export async function listInstances(projectId: string): Promise<Instance[]> {
   const res = await client.get<{ items: Instance[] }>(`projects/${projectId}/instances`);
   return res.body.items ?? [];
@@ -22,41 +45,62 @@ export async function listInstances(projectId: string): Promise<Instance[]> {
 
 export async function getInstance(projectId: string, instanceId: string): Promise<Instance> {
   const res = await client.get<Instance>(`projects/${projectId}/instances/${instanceId}`);
+  if (res.body.state === "FAILED") {
+    throw new FirebaseError(
+      `Cloud SQL instance ${instanceId} is in a failed state.\nGo to ${instanceConsoleLink(projectId, instanceId)} to repair or delete it.`,
+    );
+  }
   return res.body;
 }
 
-export async function createInstance(
-  projectId: string,
-  location: string,
-  instanceId: string,
-  enableGoogleMlIntegration: boolean,
-): Promise<Instance> {
+/** Returns a link to Cloud SQL's page in Cloud Console. */
+export function instanceConsoleLink(projectId: string, instanceId: string) {
+  return `https://console.cloud.google.com/sql/instances/${instanceId}/overview?project=${projectId}`;
+}
+
+export async function createInstance(args: {
+  projectId: string;
+  location: string;
+  instanceId: string;
+  enableGoogleMlIntegration: boolean;
+  waitForCreation: boolean;
+  freeTrial: boolean;
+}): Promise<Instance | undefined> {
   const databaseFlags = [{ name: "cloudsql.iam_authentication", value: "on" }];
-  if (enableGoogleMlIntegration) {
+  if (args.enableGoogleMlIntegration) {
     databaseFlags.push({ name: "cloudsql.enable_google_ml_integration", value: "on" });
   }
-  const op = await client.post<Partial<Instance>, Operation>(`projects/${projectId}/instances`, {
-    name: instanceId,
-    region: location,
-    databaseVersion: "POSTGRES_15",
-    settings: {
-      tier: "db-f1-micro",
-      edition: "ENTERPRISE",
-      ipConfiguration: {
-        authorizedNetworks: [],
+  let op: ClientResponse<Operation>;
+  try {
+    op = await client.post<Partial<Instance>, Operation>(`projects/${args.projectId}/instances`, {
+      name: args.instanceId,
+      region: args.location,
+      databaseVersion: "POSTGRES_15",
+      settings: {
+        tier: "db-f1-micro",
+        edition: "ENTERPRISE",
+        ipConfiguration: {
+          authorizedNetworks: [],
+        },
+        enableGoogleMlIntegration: args.enableGoogleMlIntegration,
+        databaseFlags,
+        storageAutoResize: false,
+        userLabels: { "firebase-data-connect": args.freeTrial ? "ft" : "nt" },
+        insightsConfig: {
+          queryInsightsEnabled: true,
+          queryPlansPerMinute: 5, // Match the default settings
+          queryStringLength: 1024, // Match the default settings
+        },
       },
-      enableGoogleMlIntegration,
-      databaseFlags,
-      storageAutoResize: false,
-      userLabels: { "firebase-data-connect": "ft" },
-      insightsConfig: {
-        queryInsightsEnabled: true,
-        queryPlansPerMinute: 5, // Match the default settings
-        queryStringLength: 1024, // Match the default settings
-      },
-    },
-  });
-  const opName = `projects/${projectId}/operations/${op.body.name}`;
+    });
+  } catch (err: any) {
+    handleAllowlistError(err, args.location);
+    throw err;
+  }
+  if (!args.waitForCreation) {
+    return;
+  }
+  const opName = `projects/${args.projectId}/operations/${op.body.name}`;
   const pollRes = await operationPoller.pollOperation<Instance>({
     apiOrigin: cloudSQLAdminOrigin(),
     apiVersion: API_VERSION,
@@ -108,6 +152,14 @@ export async function updateInstanceForDataConnect(
   return pollRes;
 }
 
+function handleAllowlistError(err: any, region: string) {
+  if (err.message.includes("Not allowed to set system label: firebase-data-connect")) {
+    throw new FirebaseError(
+      `Cloud SQL free trial instances are not yet available in ${region}. Please check https://firebase.google.com/docs/data-connect/ for a full list of available regions.`,
+    );
+  }
+}
+
 function setDatabaseFlag(flag: DatabaseFlag, flags: DatabaseFlag[] = []): DatabaseFlag[] {
   const temp = flags.filter((f) => f.name !== flag.name);
   temp.push(flag);
@@ -155,6 +207,17 @@ export async function createDatabase(
   });
 
   return pollRes;
+}
+
+export async function deleteDatabase(
+  projectId: string,
+  instanceId: string,
+  databaseId: string,
+): Promise<Database> {
+  const res = await client.delete<Database>(
+    `projects/${projectId}/instances/${instanceId}/databases/${databaseId}`,
+  );
+  return res.body;
 }
 
 export async function createUser(

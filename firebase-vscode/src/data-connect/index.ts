@@ -1,11 +1,12 @@
 import vscode, { Disposable, ExtensionContext, TelemetryLogger } from "vscode";
 import { Signal, effect } from "@preact/signals-core";
 import { ExtensionBrokerImpl } from "../extension-broker";
-import { registerExecution } from "./execution";
+import { registerExecution } from "./execution/execution";
 import { registerExplorer } from "./explorer";
 import { registerAdHoc } from "./ad-hoc-mutations";
 import { DataConnectService as FdcService } from "./service";
 import {
+  ConfigureSdkCodeLensProvider,
   OperationCodeLensProvider,
   SchemaCodeLensProvider,
 } from "./code-lens-provider";
@@ -23,14 +24,17 @@ import {
   registerDataConnectConfigs,
 } from "./config";
 import { locationToRange } from "../utils/graphql";
-import { runDataConnectCompiler } from "./core-compiler";
 import { Result } from "../result";
-import { runEmulatorIssuesStream } from "./emulator-stream";
 import { LanguageClient } from "vscode-languageclient/node";
 import { registerTerminalTasks } from "./terminal";
 import { registerWebview } from "../webview";
-
-import { DataConnectEmulatorController } from "./emulator";
+import { DataConnectToolkit } from "./toolkit";
+import { registerFdcSdkGeneration } from "./sdk-generation";
+import { registerDiagnostics } from "./diagnostics";
+import { AnalyticsLogger, DATA_CONNECT_EVENT_NAME } from "../analytics";
+import { emulators } from "../init/features";
+import { GCAToolClient } from "./ai-tools/gca-tool";
+import { GeminiToolController } from "./ai-tools/tool-controller";
 
 class CodeActionsProvider implements vscode.CodeActionProvider {
   constructor(
@@ -108,13 +112,7 @@ class CodeActionsProvider implements vscode.CodeActionProvider {
       return;
     }
 
-    for (const connectorResult of enclosingService.resolvedConnectors) {
-      const connector = connectorResult.tryReadValue;
-      if (!connector) {
-        // Parsing error in the connector, skip
-        continue;
-      }
-
+    for (const connector of enclosingService.resolvedConnectors) {
       results.push({
         title: `Move to "${connector.value.connectorId}"`,
         kind: vscode.CodeActionKind.Refactor,
@@ -138,12 +136,10 @@ export function registerFdc(
   broker: ExtensionBrokerImpl,
   authService: AuthService,
   emulatorController: EmulatorsController,
-  telemetryLogger: TelemetryLogger,
+  analyticsLogger: AnalyticsLogger,
 ): Disposable {
-  const fdcEmulatorsController = new DataConnectEmulatorController(
-    emulatorController,
-    broker,
-  );
+  registerDiagnostics(context, dataConnectConfigs);
+  const dataConnectToolkit = new DataConnectToolkit(broker);
 
   const codeActions = vscode.languages.registerCodeActionsProvider(
     [
@@ -156,12 +152,38 @@ export function registerFdc(
     },
   );
 
-  const fdcService = new FdcService(authService, emulatorController);
+  const fdcService = new FdcService(
+    authService,
+    dataConnectToolkit,
+    emulatorController,
+    context,
+  );
+
+  /** Gemini Related activations */
+  const toolController = new GeminiToolController(
+    analyticsLogger,
+    fdcService,
+    dataConnectConfigs,
+  );
+  const gcaToolClient = new GCAToolClient(context, toolController);
+
+  gcaToolClient.activate();
+
+  broker.on("firebase.activate.gemini", () => {
+    analyticsLogger.logger.logUsage(DATA_CONNECT_EVENT_NAME.TRY_GEMINI_CLICKED);
+    vscode.commands.executeCommand("cloudcode.gemini.chatView.focus");
+  });
+
+  /** End Gemini activations */
+
+  // register codelens
   const operationCodeLensProvider = new OperationCodeLensProvider(
-    fdcEmulatorsController,
+    emulatorController,
   );
   const schemaCodeLensProvider = new SchemaCodeLensProvider(emulatorController);
+  const configureSdkCodeLensProvider = new ConfigureSdkCodeLensProvider();
 
+  // activate FDC toolkit
   // activate language client/serer
   let client: LanguageClient;
   const lsOutputChannel: vscode.OutputChannel =
@@ -177,22 +199,6 @@ export function registerFdc(
       if (configs && configs.values.length > 0) {
         client = setupLanguageClient(context, configs, lsOutputChannel);
         vscode.commands.executeCommand("fdc-graphql.start");
-      }
-    }),
-  });
-
-  // Perform some side-effects when the endpoint changes
-  context.subscriptions.push({
-    dispose: effect(() => {
-      const configs = dataConnectConfigs.value?.tryReadValue;
-      if (configs && fdcService.localEndpoint.value) {
-        // TODO move to client.start or setupLanguageClient
-        vscode.commands.executeCommand("fdc-graphql.restart");
-        vscode.commands.executeCommand(
-          "firebase.dataConnect.executeIntrospection",
-        );
-        runEmulatorIssuesStream(configs, fdcService.localEndpoint.value);
-        runDataConnectCompiler(configs, fdcService.localEndpoint.value);
       }
     }),
   });
@@ -214,8 +220,10 @@ export function registerFdc(
     );
   });
 
+  registerDataConnectConfigs(context, broker);
+
   return Disposable.from(
-    fdcEmulatorsController,
+    dataConnectToolkit,
     codeActions,
     selectedProjectStatus,
     { dispose: sub1 },
@@ -227,21 +235,22 @@ export function registerFdc(
         selectedProjectStatus.show();
       }),
     },
-    registerDataConnectConfigs(broker),
     registerExecution(
       context,
       broker,
       fdcService,
+      analyticsLogger,
       emulatorController,
-      telemetryLogger,
     ),
     registerExplorer(context, broker, fdcService),
     registerWebview({ name: "data-connect", context, broker }),
-    registerAdHoc(fdcService, telemetryLogger),
-    registerConnectors(context, broker, fdcService, telemetryLogger),
-    registerFdcDeploy(broker, telemetryLogger),
-    registerTerminalTasks(broker, telemetryLogger),
+    registerAdHoc(fdcService, analyticsLogger),
+    registerConnectors(context, broker, fdcService, analyticsLogger),
+    registerFdcDeploy(broker, analyticsLogger),
+    registerFdcSdkGeneration(broker, analyticsLogger),
+    registerTerminalTasks(broker, analyticsLogger),
     operationCodeLensProvider,
+
     vscode.languages.registerCodeLensProvider(
       // **Hack**: For testing purposes, enable code lenses on all graphql files
       // inside the test_projects folder.
@@ -263,6 +272,11 @@ export function registerFdc(
       ],
       schemaCodeLensProvider,
     ),
+    vscode.languages.registerCodeLensProvider(
+      [{ scheme: "file", language: "yaml", pattern: "**/connector.yaml" }],
+      configureSdkCodeLensProvider,
+    ),
+    toolController,
     {
       dispose: () => {
         client.stop();

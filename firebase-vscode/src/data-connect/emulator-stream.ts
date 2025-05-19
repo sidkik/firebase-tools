@@ -3,12 +3,14 @@ import fetch from "node-fetch";
 import { Observable, of } from "rxjs";
 import { backOff } from "exponential-backoff";
 import { ResolvedDataConnectConfigs } from "./config";
+import { Signal } from "@preact/signals-core";
 
 enum Kind {
   KIND_UNSPECIFIED = "KIND_UNSPECIFIED",
   SQL_CONNECTION = "SQL_CONNECTION",
   SQL_MIGRATION = "SQL_MIGRATION",
   VERTEX_AI = "VERTEX_AI",
+  FILE_RELOAD = "FILE_RELOAD",
 }
 enum Severity {
   SEVERITY_UNSPECIFIED = "SEVERITY_UNSPECIFIED",
@@ -27,20 +29,27 @@ type EmulatorIssueResponse = { result?: { issues?: EmulatorIssue[] } };
 export const emulatorOutputChannel =
   vscode.window.createOutputChannel("Firebase Emulators");
 
+// on schema reload, restart language server and run introspection again
+function schemaReload() {
+  vscode.commands.executeCommand("fdc-graphql.restart");
+  vscode.commands.executeCommand("firebase.dataConnect.executeIntrospection");
+}
+
 /**
- *
+ * TODO: convert to class
  * @param fdcEndpoint FDC Emulator endpoint
  */
 export async function runEmulatorIssuesStream(
   configs: ResolvedDataConnectConfigs,
   fdcEndpoint: string,
+  isPostgresEnabled: Signal<boolean>,
 ) {
   const obsErrors = await getEmulatorIssuesStream(configs, fdcEndpoint);
   const obsConverter = {
     next(nextResponse: EmulatorIssueResponse) {
       if (nextResponse.result?.issues?.length) {
         for (const issue of nextResponse.result.issues) {
-          displayIssue(issue);
+          displayAndHandleIssue(issue, isPostgresEnabled);
         }
       }
     },
@@ -57,14 +66,23 @@ export async function runEmulatorIssuesStream(
 /**
  * Based on the severity of the issue, either log, display notification, or display interactive popup to the user
  */
-export function displayIssue(issue: EmulatorIssue) {
+export function displayAndHandleIssue(
+  issue: EmulatorIssue,
+  isPostgresEnabled: Signal<boolean>,
+) {
   const issueMessage = `Data Connect Emulator: ${issue.kind.toString()} - ${issue.message}`;
   if (issue.severity === Severity.ALERT) {
     vscode.window.showErrorMessage(issueMessage);
-  } else if (issue.severity === Severity.NOTICE) {
-    vscode.window.showWarningMessage(issueMessage);
   }
   emulatorOutputChannel.appendLine(issueMessage);
+
+  // special handlings
+  if (issue.kind === Kind.SQL_CONNECTION) {
+    isPostgresEnabled.value = false;
+  }
+  if (issue.kind === Kind.FILE_RELOAD) {
+    schemaReload();
+  }
 }
 
 /**

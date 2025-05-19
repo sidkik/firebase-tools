@@ -619,29 +619,18 @@ export class FirestoreApi {
 
   /**
    * Create a named Firestore Database
-   * @param project the Firebase project id.
-   * @param databaseId the name of the Firestore Database
-   * @param locationId the id of the region the database will be created in
-   * @param type FIRESTORE_NATIVE or DATASTORE_MODE
-   * @param deleteProtectionState DELETE_PROTECTION_ENABLED or DELETE_PROTECTION_DISABLED
-   * @param pointInTimeRecoveryEnablement POINT_IN_TIME_RECOVERY_ENABLED or POINT_IN_TIME_RECOVERY_DISABLED
+   * @param req the request to create a database
    */
-  async createDatabase(
-    project: string,
-    databaseId: string,
-    locationId: string,
-    type: types.DatabaseType,
-    deleteProtectionState: types.DatabaseDeleteProtectionState,
-    pointInTimeRecoveryEnablement: types.PointInTimeRecoveryEnablement,
-  ): Promise<types.DatabaseResp> {
-    const url = `/projects/${project}/databases`;
+  async createDatabase(req: types.CreateDatabaseReq): Promise<types.DatabaseResp> {
+    const url = `/projects/${req.project}/databases`;
     const payload: types.DatabaseReq = {
-      type,
-      locationId,
-      deleteProtectionState,
-      pointInTimeRecoveryEnablement,
+      locationId: req.locationId,
+      type: req.type,
+      deleteProtectionState: req.deleteProtectionState,
+      pointInTimeRecoveryEnablement: req.pointInTimeRecoveryEnablement,
+      cmekConfig: req.cmekConfig,
     };
-    const options = { queryParams: { databaseId: databaseId } };
+    const options = { queryParams: { databaseId: req.databaseId } };
     const res = await this.apiClient.post<types.DatabaseReq, { response?: types.DatabaseResp }>(
       url,
       payload,
@@ -706,16 +695,19 @@ export class FirestoreApi {
    * @param project the Firebase project id.
    * @param databaseId the ID of the Firestore Database to be restored into
    * @param backupName Name of the backup from which to restore
+   * @param encryptionConfig the encryption configuration of the restored database
    */
   async restoreDatabase(
     project: string,
     databaseId: string,
     backupName: string,
+    encryptionConfig?: types.EncryptionConfig,
   ): Promise<types.DatabaseResp> {
     const url = `/projects/${project}/databases:restore`;
     const payload: types.RestoreDatabaseReq = {
       databaseId,
       backup: backupName,
+      encryptionConfig: encryptionConfig,
     };
     const options = { queryParams: { databaseId: databaseId } };
     const res = await this.apiClient.post<
